@@ -8,7 +8,6 @@ commands:
   - script: |
     #!/bin/sh
     set -euxo pipefail
-
     seconds=1
     while [ $seconds -le 30 ]; do
       rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
@@ -18,9 +17,7 @@ commands:
       sleep 1
       seconds=$(( $seconds + 1 ))
     done
-
     sleep 20 # make sure a rollout started
-
     oc rollout status deployment/keystone -n $NAMESPACE
 ---
 apiVersion: v1
@@ -33,7 +30,6 @@ commands:
   - script: |
     #!/bin/sh
     set -euxo pipefail
-
     seconds=1
     while [ $seconds -le 30 ]; do
       rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
@@ -43,9 +39,7 @@ commands:
       sleep 1
       seconds=$(( $seconds + 1 ))
     done
-
     sleep 20 # make sure a rollout started
-
     oc rollout status deployment/keystone -n $NAMESPACE
 ---
 apiVersion: v1
@@ -58,7 +52,6 @@ commands:
   - script: |
     #!/bin/sh
     set -euxo pipefail
-
     seconds=1
     while [ $seconds -le 30 ]; do
       rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
@@ -68,9 +61,7 @@ commands:
       sleep 1
       seconds=$(( $seconds + 1 ))
     done
-
     sleep 20 # make sure a rollout started
-
     oc rollout status deployment/keystone -n $NAMESPACE
 ---
 apiVersion: v1
@@ -83,7 +74,6 @@ commands:
   - script: |
     #!/bin/sh
     set -euxo pipefail
-
     seconds=1
     while [ $seconds -le 30 ]; do
       rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
@@ -93,9 +83,7 @@ commands:
       sleep 1
       seconds=$(( $seconds + 1 ))
     done
-
     sleep 20 # make sure a rollout started
-
     oc rollout status deployment/keystone -n $NAMESPACE
 ---
 apiVersion: v1
@@ -108,7 +96,6 @@ commands:
   - script: |
     #!/bin/sh
     set -euxo pipefail
-
     seconds=1
     while [ $seconds -le 30 ]; do
       rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
@@ -118,9 +105,7 @@ commands:
       sleep 1
       seconds=$(( $seconds + 1 ))
     done
-
     sleep 20 # make sure a rollout started
-
     oc rollout status deployment/keystone -n $NAMESPACE
 ---
 apiVersion: v1
@@ -133,7 +118,6 @@ commands:
   - script: |
     #!/bin/sh
     set -euxo pipefail
-
     seconds=1
     while [ $seconds -le 30 ]; do
       rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
@@ -143,7 +127,5 @@ commands:
       sleep 1
       seconds=$(( $seconds + 1 ))
     done
-
     sleep 20 # make sure a rollout started
-
     oc rollout status deployment/keystone -n $NAMESPACE
