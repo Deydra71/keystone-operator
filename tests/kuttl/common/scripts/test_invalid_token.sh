@@ -11,7 +11,7 @@ while [ $seconds -le 30 ]; do
     seconds=$(( $seconds + 1 ))
 done
 
-sleep 20 # make sure a rollout started
+#sleep 20 # make sure a rollout started
 
 oc rollout status deployment/keystone -n $NAMESPACE
 
@@ -19,7 +19,6 @@ export OS_TOKEN=$(cat /tmp/temporary_test_token)
 
 alias openstack="oc exec -tn $NAMESPACE openstackclient -- env -u OS_CLOUD - OS_AUTH_URL=http://keystone-public.keystone-kuttl-tests.svc:5000 OS_AUTH_TYPE=token OS_TOKEN=$OS_TOKEN openstack"
 
-echo "DEBUG TOKEN"
 openstack endpoint list
 
 if openstack endpoint list 2>&1 | grep "Failed to validate token"; then
