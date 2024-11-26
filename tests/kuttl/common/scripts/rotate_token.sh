@@ -1,24 +1,42 @@
-#!/bin/sh
-set -euxo pipefail
+#!/bin/bash
+set -x
 
-wait_rotation() {
-	while [ $seconds -le 30 ]; do
-		rotatedat=$(oc get secret keystone -n $NAMESPACE -o jsonpath="{.metadata.annotations['keystone\.openstack\.org/rotatedat']}")
-		if [ $rotatedat != "2009-11-10T23:00:00Z" ]; then
-			return
-		fi
-		sleep 1
-		seconds=$(( $seconds + 1 ))
-	done
+TMP_SECRET_FILE="/tmp/keystone-secret.yaml"
+
+generate_secret_yaml() {
+    cat <<EOF > $TMP_SECRET_FILE
+apiVersion: v1
+kind: Secret
+metadata:
+    name: keystone
+    namespace: keystone-kuttl-tests
+    annotations:
+        keystone.openstack.org/rotatedat: "2009-11-10T23:00:00Z"
+EOF
 }
 
-seconds=1
+for rotation in {1..6}; do
+    echo "Starting rotation $rotation..."
 
-for i in {1..6}; do
-	wait_rotation
+    # Apply new secret to trigger rotation
+    generate_secret_yaml
+    if ! oc apply -f $TMP_SECRET_FILE; then
+        echo "Failed to apply the secret!"
+        rm -f $TMP_SECRET_FILE
+        exit 1
+    fi
 
-	sleep 20 # make sure a rollout started
-	oc rollout status deployment/keystone -n $NAMESPACE
+    sleep 100
 
-	oc annotate secret keystone -n $NAMESPACE rotatedat='2009-11-10T23:00:00Z'
+    # Wait for rollout to complete
+    if ! oc rollout status deployment/keystone -n $NAMESPACE --timeout=60s; then
+        echo "Rollout status check failed for rotation $rotation."
+        continue
+    fi
+
+    echo "Rotation $rotation completed successfully."
 done
+
+rm -f $TMP_SECRET_FILE
+echo "All rotations completed successfully."
+exit 0

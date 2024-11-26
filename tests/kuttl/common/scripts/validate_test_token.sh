@@ -19,7 +19,7 @@ export OS_TOKEN=$(cat /tmp/temporary_test_token)
 
 alias openstack="oc exec -tn $NAMESPACE openstackclient -- env -u OS_CLOUD - OS_AUTH_URL=http://keystone-public.keystone-kuttl-tests.svc:5000 OS_AUTH_TYPE=token OS_TOKEN=$OS_TOKEN openstack"
 
-if openstack endpoint list 2>&1 | grep "Failed to validate token"; then
+if openstack endpoint list 2>&1 | grep "Could not recognize Fernet token"; then
     exit 1
 else
     exit 0
