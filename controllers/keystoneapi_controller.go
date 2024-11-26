@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
@@ -194,7 +195,7 @@ func (r *KeystoneAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		condition.UnknownCondition(condition.DBSyncReadyCondition, condition.InitReason, condition.DBSyncReadyInitMessage),
 		condition.UnknownCondition(condition.RabbitMqTransportURLReadyCondition, condition.InitReason, condition.RabbitMqTransportURLReadyInitMessage),
 		condition.UnknownCondition(condition.MemcachedReadyCondition, condition.InitReason, condition.MemcachedReadyInitMessage),
-		condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
+		condition.UnknownCondition(condition.CreateServiceReadyCondition, condition.InitReason, condition.CreateServiceReadyInitMessage),
 		condition.UnknownCondition(condition.BootstrapReadyCondition, condition.InitReason, condition.BootstrapReadyInitMessage),
 		condition.UnknownCondition(condition.InputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
 		condition.UnknownCondition(condition.ServiceConfigReadyCondition, condition.InitReason, condition.ServiceConfigReadyInitMessage),
@@ -557,10 +558,10 @@ func (r *KeystoneAPIReconciler) reconcileInit(
 		)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ExposeServiceReadyCondition,
+				condition.CreateServiceReadyCondition,
 				condition.ErrorReason,
 				condition.SeverityWarning,
-				condition.ExposeServiceReadyErrorMessage,
+				condition.CreateServiceReadyErrorMessage,
 				err.Error()))
 
 			return ctrl.Result{}, err
@@ -589,19 +590,19 @@ func (r *KeystoneAPIReconciler) reconcileInit(
 		ctrlResult, err := svc.CreateOrPatch(ctx, helper)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ExposeServiceReadyCondition,
+				condition.CreateServiceReadyCondition,
 				condition.ErrorReason,
 				condition.SeverityWarning,
-				condition.ExposeServiceReadyErrorMessage,
+				condition.CreateServiceReadyErrorMessage,
 				err.Error()))
 
 			return ctrlResult, err
 		} else if (ctrlResult != ctrl.Result{}) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ExposeServiceReadyCondition,
+				condition.CreateServiceReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
-				condition.ExposeServiceReadyRunningMessage))
+				condition.CreateServiceReadyRunningMessage))
 			return ctrlResult, nil
 		}
 		// create service - end
@@ -619,7 +620,7 @@ func (r *KeystoneAPIReconciler) reconcileInit(
 		}
 	}
 
-	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
+	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
 	//
 	// Update instance status with service endpoint url from route host information
@@ -949,8 +950,9 @@ func (r *KeystoneAPIReconciler) reconcileNormal(
 	//
 
 	// networks to attach to
+	nadList := []networkv1.NetworkAttachmentDefinition{}
 	for _, netAtt := range instance.Spec.NetworkAttachments {
-		_, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
+		nad, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				Log.Info(fmt.Sprintf("network-attachment-definition %s not found", netAtt))
@@ -970,9 +972,13 @@ func (r *KeystoneAPIReconciler) reconcileNormal(
 				err.Error()))
 			return ctrl.Result{}, err
 		}
+
+		if nad != nil {
+			nadList = append(nadList, *nad)
+		}
 	}
 
-	serviceAnnotations, err := nad.CreateNetworksAnnotation(instance.Namespace, instance.Spec.NetworkAttachments)
+	serviceAnnotations, err := nad.EnsureNetworksAnnotation(nadList)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
 			instance.Spec.NetworkAttachments, err)
@@ -1190,6 +1196,7 @@ func (r *KeystoneAPIReconciler) generateServiceConfigMaps(
 			keystone.DatabaseName,
 		),
 		"enableSecureRBAC": instance.Spec.EnableSecureRBAC,
+		"ProcessNumber":    instance.Spec.HttpdCustomization.ProcessNumber,
 	}
 
 	// create httpd  vhost template parameters

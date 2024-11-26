@@ -138,7 +138,7 @@ type KeystoneAPISpecCore struct {
 
 	// +kubebuilder:validation:Optional
 	// NodeSelector to target subset of worker nodes running this service
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	NodeSelector *map[string]string `json:"nodeSelector,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
@@ -156,6 +156,10 @@ type KeystoneAPISpecCore struct {
 	// But can also be used to add additional files. Those get added to the service config dir in /etc/<service> .
 	// TODO: -> implement
 	DefaultConfigOverwrite map[string]string `json:"defaultConfigOverwrite,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// HttpdCustomization - customize the httpd service
+	HttpdCustomization HttpdCustomization `json:"httpdCustomization,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// Resources - Compute Resources required by this service (Limits/Requests).
@@ -195,6 +199,15 @@ type PasswordSelector struct {
 	// +kubebuilder:default="AdminPassword"
 	// Admin - Selector to get the keystone Admin password from the Secret
 	Admin string `json:"admin"`
+}
+
+// HttpdCustomization - customize the httpd service
+type HttpdCustomization struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// ProcessNumber - Number of processes running in keystone API
+	ProcessNumber *int32 `json:"processNumber"`
 }
 
 // KeystoneAPIStatus defines the observed state of KeystoneAPI

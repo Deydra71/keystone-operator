@@ -7,20 +7,21 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gophercloud/gophercloud v1.14.1
 	github.com/onsi/gomega v1.34.1
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.4.1-0.20241014140317-e5c35d28f3af
-	github.com/openstack-k8s-operators/lib-common/modules/openstack v0.4.1-0.20241014140317-e5c35d28f3af
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20241014140317-e5c35d28f3af
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.5.1-0.20241113144931-ff1fd2dcd04a
+	github.com/openstack-k8s-operators/lib-common/modules/openstack v0.5.1-0.20241029151503-4878b3fa3333
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.5.1-0.20241029151503-4878b3fa3333
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
-	k8s.io/api v0.29.9
-	k8s.io/apimachinery v0.29.9
+	k8s.io/api v0.29.10
+	k8s.io/apimachinery v0.29.10
 	sigs.k8s.io/controller-runtime v0.17.6
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.11.2 // indirect
+	github.com/evanphx/json-patch v5.7.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.9.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-openapi/jsonpointer v0.20.2 // indirect
@@ -35,16 +36,16 @@ require (
 	github.com/imdario/mergo v0.3.16 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.4 // indirect
+	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.5 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/openshift/api v3.9.0+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.18.0 // indirect
+	github.com/prometheus/client_golang v1.19.0 // indirect
 	github.com/prometheus/client_model v0.5.0 // indirect
-	github.com/prometheus/common v0.46.0 // indirect
+	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/net v0.28.0 // indirect
@@ -59,9 +60,9 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiextensions-apiserver v0.29.9 // indirect
-	k8s.io/client-go v0.29.9 // indirect
-	k8s.io/component-base v0.29.9 // indirect
+	k8s.io/apiextensions-apiserver v0.29.10 // indirect
+	k8s.io/client-go v0.29.10 // indirect
+	k8s.io/component-base v0.29.10 // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8 // indirect
