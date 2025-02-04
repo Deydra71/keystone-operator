@@ -234,7 +234,7 @@ func (r *KeystoneAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // fields to index to reconcile when change
 const (
 	passwordSecretField                 = ".spec.secret"
-	caBundleSecretNameField             = ".spec.tls.caBundleSecretName"
+	caBundleSecretNameField             = ".spec.tls.caBundleSecretName" // #nosec G101
 	tlsAPIInternalField                 = ".spec.tls.api.internal.secretName"
 	tlsAPIPublicField                   = ".spec.tls.api.public.secretName"
 	httpdCustomServiceConfigSecretField = ".spec.httpdCustomization.customServiceConfigSecret"
@@ -1071,13 +1071,12 @@ func (r *KeystoneAPIReconciler) reconcileNormal(
 	if networkReady {
 		instance.Status.Conditions.MarkTrue(condition.NetworkAttachmentsReadyCondition, condition.NetworkAttachmentsReadyMessage)
 	} else {
-		err := fmt.Errorf("not all pods have interfaces with ips as configured in NetworkAttachments: %s", instance.Spec.NetworkAttachments)
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.NetworkAttachmentsReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			condition.NetworkAttachmentsReadyErrorMessage,
-			err.Error()))
+			keystonev1.KeystoneNetworkAttachmentsReadyErrorMessage,
+			instance.Spec.NetworkAttachments))
 
 		return ctrl.Result{}, err
 	}
