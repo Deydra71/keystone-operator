@@ -125,6 +125,7 @@ spec:
                   type: object
                 type: array
               serviceID:
+                description: ServiceID
                 type: string
             type: object
         type: object

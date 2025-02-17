@@ -48,7 +48,9 @@ type KeystoneServiceSpec struct {
 
 // KeystoneServiceStatus defines the observed state of KeystoneService
 type KeystoneServiceStatus struct {
+	// ServiceID
 	ServiceID string `json:"serviceID,omitempty"`
+
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`
 }
