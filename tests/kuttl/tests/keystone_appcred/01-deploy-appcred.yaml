@@ -1,0 +1,27 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-service-secret
+type: Opaque
+data:
+  ServicePassword: dGVzdC1wYXNzd29yZC0xMjM=
+---
+apiVersion: keystone.openstack.org/v1beta1
+kind: KeystoneApplicationCredential
+metadata:
+  name: test-appcred
+spec:
+  secret: test-service-secret
+  passwordSelector: ServicePassword
+  userName: testservice
+  expirationDays: 365
+  gracePeriodDays: 180
+  roles:
+    - admin
+    - member
+  unrestricted: false
+  accessRules:
+    - service: identity
+      method: POST
+      path: /auth/tokens 

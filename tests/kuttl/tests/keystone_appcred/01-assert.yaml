@@ -1,0 +1,62 @@
+#
+# Check for:
+#
+# - KeystoneApplicationCredential CR with Ready status
+# - AC secret created with AC_ID and AC_SECRET fields
+#
+---
+apiVersion: keystone.openstack.org/v1beta1
+kind: KeystoneApplicationCredential
+metadata:
+  name: test-appcred
+spec:
+  secret: test-service-secret
+  passwordSelector: ServicePassword
+  userName: testservice
+  expirationDays: 365
+  gracePeriodDays: 180
+  roles:
+    - admin
+    - member
+  unrestricted: false
+  accessRules:
+    - service: identity
+      method: POST
+      path: /auth/tokens
+status:
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: Ready
+  acID: ?*
+  secretName: test-appcred-secret
+  createdAt: ?*
+  expiresAt: ?*
+---
+# Verify the AC secret exists and contains the required data fields
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-appcred-secret
+type: Opaque
+data:
+  AC_ID: ?*
+  AC_SECRET: ?*
+---
+# Verify AC_ID consistency between Secret and CR status
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # Get AC_ID from secret and CR
+      SECRET_AC_ID=$(oc get -n $NAMESPACE secret test-appcred-secret -o jsonpath='{.data.AC_ID}' | base64 -d)
+      CR_AC_ID=$(oc get -n $NAMESPACE keystoneapplicationcredential test-appcred -o jsonpath='{.status.acID}')
+      
+      # Verify they match
+      if [ "$SECRET_AC_ID" != "$CR_AC_ID" ]; then
+        echo "ERROR: AC_ID mismatch! Secret: $SECRET_AC_ID, CR: $CR_AC_ID"
+        exit 1
+      fi
+      
+      echo "✓ AC_ID consistency verified: $CR_AC_ID"
+      exit 0 
