@@ -63,6 +63,7 @@ func (r *ApplicationCredentialReconciler) GetLogger(ctx context.Context) logr.Lo
 // +kubebuilder:rbac:groups=keystone.openstack.org,resources=applicationcredentials,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=keystone.openstack.org,resources=applicationcredentials/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=keystone.openstack.org,resources=applicationcredentials/finalizers,verbs=update;patch
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;create;update;delete;patch
 
 func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
 	logger := r.GetLogger(ctx)
@@ -219,6 +220,13 @@ func (r *ApplicationCredentialReconciler) createOrRotateACInKeystone(
 	if identClient == nil {
 		return "", "", fmt.Errorf("failed to rotate AC: %w", errNoIdentityClient)
 	}
+
+	provider := identClient.ProviderClient
+	log.Info("OpenStack Auth Context",
+		"TokenID", provider.TokenID,
+		"UserAgent", provider.UserAgent,
+		"IdentityEndpoint", provider.IdentityBase,
+	)
 
 	// Lookup user via openstack.go -> GetUser()
 	userObj, err := os.GetUser(log, ac.Spec.UserName, "default")
