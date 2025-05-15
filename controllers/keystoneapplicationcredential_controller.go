@@ -57,7 +57,7 @@ type ApplicationCredentialReconciler struct {
 //+kubebuilder:rbac:groups=keystone.openstack.org,resources=applicationcredentials/finalizers,verbs=update;patch
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;create;update;delete;patch
 
-func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := r.GetLogger(ctx)
 
 	// Fetch the CR
@@ -66,44 +66,52 @@ func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Setup helper
-	helperObj, err := helper.NewHelper(
-		instance,
-		r.Client,
-		r.Kclient,
-		r.Scheme,
-		logger,
-	)
+	// Initialize status conditions on first reconcile
+	if instance.Status.Conditions == nil {
+		cl := condition.CreateList(
+			condition.UnknownCondition(keystonev1.KeystoneAPIReadyCondition, condition.InitReason, keystonev1.KeystoneAPIReadyInitMessage),
+			condition.UnknownCondition(keystonev1.AdminServiceClientReadyCondition, condition.InitReason, keystonev1.AdminServiceClientReadyInitMessage),
+			condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
+		)
+		instance.Status.Conditions = condition.Conditions{}
+		instance.Status.Conditions.Init(&cl)
+		// Persist early, so CLI shows status
+		if err := r.Client.Status().Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Save and defer patching all subconditions and overall Ready
+	saved := instance.Status.Conditions.DeepCopy()
+	defer func() {
+		if instance.DeletionTimestamp.IsZero() {
+			condition.RestoreLastTransitionTimes(&instance.Status.Conditions, saved)
+			if instance.Status.Conditions.AllSubConditionIsTrue() {
+				instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+			} else {
+				instance.Status.Conditions.MarkUnknown(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage)
+				instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
+			}
+
+			h, err := helper.NewHelper(instance, r.Client, r.Kclient, r.Scheme, logger)
+			if err != nil {
+				retErr = err
+				return
+			}
+			if err := h.PatchInstance(ctx, instance); err != nil {
+				retErr = err
+			}
+		}
+	}()
+
+	// Setup helper for use in reconciles
+	helperObj, err := helper.NewHelper(instance, r.Client, r.Kclient, r.Scheme, logger)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Initialize conditions if needed
-	if instance.Status.Conditions == nil {
-		instance.Status.Conditions = condition.Conditions{}
-	}
-	savedConditions := instance.Status.Conditions.DeepCopy()
-
-	// Defer patch logic (skips if we are deleting)
-	defer func() {
-		if !instance.DeletionTimestamp.IsZero() {
-			return
-		}
-		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
-		// Mirror the top-level Ready condition
-		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
-			instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
-		}
-		_ = helperObj.PatchInstance(ctx, instance)
-	}()
-
-	// Ensure we have an initial ReadyCondition
-	condList := condition.CreateList(
-		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
-	)
-	instance.Status.Conditions.Init(&condList)
-
-	// Check if marked for deletion
+	// Handle deletion
 	if !instance.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, instance, helperObj)
 	}
@@ -117,7 +125,6 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 	instance *keystonev1.ApplicationCredential,
 	helperObj *helper.Helper,
 ) (ctrl.Result, error) {
-
 	logger := r.GetLogger(ctx)
 
 	// Add finalizer if not present
@@ -133,54 +140,66 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 	// Check if KeystoneAPI is ready
 	keystoneAPI, err := keystonev1.GetKeystoneAPI(ctx, helperObj, instance.Namespace, nil)
 	if err != nil {
-		logger.Info("KeystoneAPI not found, requeue", "error", err)
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			keystonev1.KeystoneAPIReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			fmt.Sprintf("KeystoneAPI not found: %v", err),
+		))
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	if !keystoneAPI.IsReady() {
-		logger.Info("KeystoneAPI not ready, requeue")
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			keystonev1.KeystoneAPIReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			keystonev1.KeystoneAPIReadyWaitingMessage,
+		))
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
+	instance.Status.Conditions.MarkTrue(
+		keystonev1.KeystoneAPIReadyCondition,
+		condition.ReadyMessage,
+	)
 
-	// Decide if we need to create (or rotate)
-	doRotate, msg := r.needsRotation(instance)
+	// Decide if we need to create or rotate
+	doRotate, msg := needsRotation(instance)
 	if doRotate {
 		logger.Info(msg)
-		// Find user ID
+
+		// Lookup the user ID
 		userID, err := r.findUserIDAsAdmin(ctx, helperObj, keystoneAPI, instance.Spec.UserName)
 		if err != nil {
-			logger.Error(err, "Failed to find user ID")
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ReadyCondition,
-				condition.ErrorReason,
-				condition.SeverityWarning,
-				"User lookup failed %s",
-				err.Error(),
-			))
 			return ctrl.Result{}, err
 		}
 		logger.Info("Found user ID", "userName", instance.Spec.UserName, "userID", userID)
 
-		// Build user-scoped client
-		userOS, userClientRes, userClientErr := keystonev1.GetUserServiceClient(ctx, helperObj, keystoneAPI, instance.Spec.UserName, instance.Spec.Secret, instance.Spec.PasswordSelector)
-		if userClientErr != nil {
-			return userClientRes, userClientErr
+		// Build a service‐scoped client
+		userOS, userRes, userErr := keystonev1.GetUserServiceClient(
+			ctx, helperObj, keystoneAPI,
+			instance.Spec.UserName,
+			instance.Spec.Secret,
+			instance.Spec.PasswordSelector,
+		)
+		if userErr != nil {
+			return userRes, userErr
 		}
-		if userClientRes != (ctrl.Result{}) {
-			// Requeue if we got a partial result
-			return userClientRes, nil
+		if userRes != (ctrl.Result{}) {
+			return userRes, nil
 		}
 
 		// Create new AC in Keystone
 		newACName := fmt.Sprintf("%s-%s", instance.Name, randomSuffix(5))
-		newID, newSecret, expiresAt, err := r.createACWithName(logger, userOS.GetOSClient(), userID, instance, newACName)
+		newID, newSecret, expiresAt, err := r.createACWithName(
+			logger, userOS.GetOSClient(), userID, instance, newACName,
+		)
 		if err != nil {
 			logger.Error(err, "Could not create AC in Keystone")
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.ReadyCondition,
 				condition.ErrorReason,
 				condition.SeverityWarning,
-				"Failed to create AC %s",
-				err.Error(),
+				fmt.Sprintf("Failed to create AC: %s", err.Error()),
 			))
 			return ctrl.Result{}, err
 		}
@@ -197,24 +216,23 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 		instance.Status.SecretName = secretName
 		instance.Status.CreatedAt = &metav1.Time{Time: time.Now().UTC()}
 		instance.Status.ExpiresAt = &metav1.Time{Time: expiresAt}
-
 		instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "AC is ready")
 
-		// Immediate patch
-		if patchErr := helperObj.PatchInstance(ctx, instance); patchErr != nil {
-			return ctrl.Result{}, patchErr
+		// patch status immediately
+		if err := helperObj.PatchInstance(ctx, instance); err != nil {
+			return ctrl.Result{}, err
 		}
 
-		// Requeue
+		// requeue to check again before next rotate
 		nextCheck := r.computeNextRequeue(instance)
-		logger.Info("Rotated AC, requeuing to check again", "nextCheck", nextCheck)
+		logger.Info("Rotated AC, requeuing", "nextCheck", nextCheck)
 		return ctrl.Result{RequeueAfter: nextCheck}, nil
 	}
 
 	logger.Info("AC is up to date", "ACID", instance.Status.ACID)
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Up to date")
 
-	// Requeue to check again before next expiry
+	// requeue to check again before next expiry
 	nextCheck := r.computeNextRequeue(instance)
 	return ctrl.Result{RequeueAfter: nextCheck}, nil
 }
@@ -338,18 +356,6 @@ func (r *ApplicationCredentialReconciler) findUserIDAsAdmin(
 	return userObj.ID, nil
 }
 
-// shouldRotateNow returns true if we are already within GracePeriodDays
-func (r *ApplicationCredentialReconciler) shouldRotateNow(ac *keystonev1.ApplicationCredential) bool {
-	if ac.Status.ExpiresAt == nil || ac.Status.ExpiresAt.IsZero() {
-		return false
-	}
-
-	expiry := ac.Status.ExpiresAt.Time
-	grace := time.Duration(ac.Spec.GracePeriodDays) * 24 * time.Hour
-	rotateAt := expiry.Add(-grace)
-	return time.Now().After(rotateAt)
-}
-
 // computeNextRequeue schedules the next check to happen at "expiry - grace"
 func (r *ApplicationCredentialReconciler) computeNextRequeue(ac *keystonev1.ApplicationCredential) time.Duration {
 	// default requeue is 24h as minimal grace period is 1 day
@@ -364,12 +370,28 @@ func (r *ApplicationCredentialReconciler) computeNextRequeue(ac *keystonev1.Appl
 	rotateAt := expiry.Add(-grace)
 
 	if rotateAt.Before(time.Now()) {
-		// Already within the grace window, so trigger rotation immediately
+		// already within the grace window, so trigger rotation immediately
 		return 0
 	}
 
-	// Otherwise check again in 24 hours
+	// otherwise check again in 24 hours
 	return defaultRequeue
+}
+
+// needsRotation returns (shouldRotate, logMessage)
+func needsRotation(ac *keystonev1.ApplicationCredential) (bool, string) {
+	if ac.Status.ACID == "" {
+		return true, "AC does not exist, creating"
+	}
+	expiry := ac.Status.ExpiresAt
+	if expiry != nil && !expiry.IsZero() {
+		// compute grace window
+		rotateAt := expiry.Time.Add(-time.Duration(ac.Spec.GracePeriodDays) * 24 * time.Hour)
+		if time.Now().After(rotateAt) {
+			return true, "AC is within grace period, rotating"
+		}
+	}
+	return false, ""
 }
 
 // randomSuffix generates a random string suffix
@@ -391,15 +413,4 @@ func (r *ApplicationCredentialReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *ApplicationCredentialReconciler) GetLogger(ctx context.Context) logr.Logger {
 	return ctrlLog.FromContext(ctx).WithName("ApplicationCredentialReconciler")
-}
-
-// decide whether we should create or rotate this AC
-func (r *ApplicationCredentialReconciler) needsRotation(ac *keystonev1.ApplicationCredential) (bool, string) {
-	if ac.Status.ACID == "" {
-		return true, "AC does not exist, creating"
-	}
-	if r.shouldRotateNow(ac) {
-		return true, "AC is within grace period, rotating"
-	}
-	return false, ""
 }
