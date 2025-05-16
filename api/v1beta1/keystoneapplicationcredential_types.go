@@ -39,15 +39,37 @@ type ApplicationCredentialSpec struct {
 
 	// ExpirationDays sets the lifetime in days for the AC
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=14
+	// +kubebuilder:default=365
 	// +kubebuilder:validation:Minimum=2
 	ExpirationDays int `json:"expirationDays"`
 
 	// GracePeriodDays sets how many days before expiration the AC should be rotated
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=7
+	// +kubebuilder:default=182
 	// +kubebuilder:validation:Minimum=1
 	GracePeriodDays int `json:"gracePeriodDays"`
+
+	// Roles to assign to the ApplicationCredential
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={"admin","service"}
+	// +kubebuilder:validation:MinItems=1
+	Roles []string `json:"roles,omitempty"`
+
+	// Unrestricted indicates whether the AC may be used to create or destroy other credentials or trusts
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	Unrestricted bool `json:"unrestricted,omitempty"`
+
+	// AccessRules defines which services the AC is permitted to access
+	// +kubebuilder:validation:Optional
+	AccessRules []ACRule `json:"accessRules,omitempty"`
+}
+
+// ACRule defines a service-only access rule for an ApplicationCredential
+type ACRule struct {
+	// Service is the OpenStack service type
+	// +kubebuilder:validation:Optional
+	Service string `json:"service,omitempty"`
 }
 
 // ApplicationCredentialStatus defines the observed state

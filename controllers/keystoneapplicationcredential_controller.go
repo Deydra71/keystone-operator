@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -40,9 +39,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-// TODO: move this to conditions
-var ErrAdminServiceClientNotReady = errors.New("admin client not ready")
 
 // ApplicationCredentialReconciler reconciles an ApplicationCredential object
 type ApplicationCredentialReconciler struct {
@@ -168,9 +164,18 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 		logger.Info(msg)
 
 		// Lookup the user ID
-		userID, err := r.findUserIDAsAdmin(ctx, helperObj, keystoneAPI, instance.Spec.UserName)
+		userID, ctrlResult, err := r.findUserIDAsAdmin(
+			ctx,
+			instance,
+			helperObj,
+			keystoneAPI,
+			instance.Spec.UserName,
+		)
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if ctrlResult != (ctrl.Result{}) {
+			return ctrlResult, nil
 		}
 		logger.Info("Found user ID", "userName", instance.Spec.UserName, "userID", userID)
 
@@ -243,26 +248,25 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 	helperObj *helper.Helper,
 ) (ctrl.Result, error) {
 
-	logger := r.GetLogger(ctx)
-
 	// Only if user explicitly does "oc delete" do we revoke the AC
-	if instance.Status.ACID != "" {
-		keystoneAPI, err := keystonev1.GetKeystoneAPI(ctx, helperObj, instance.Namespace, nil)
-		if err == nil && keystoneAPI.IsReady() {
-			userID, userErr := r.findUserIDAsAdmin(ctx, helperObj, keystoneAPI, instance.Spec.UserName)
-			if userErr == nil {
-				userOS, userRes, userErr2 := keystonev1.GetUserServiceClient(ctx, helperObj, keystoneAPI, instance.Spec.UserName, instance.Spec.Secret, instance.Spec.PasswordSelector)
-				if userErr2 == nil && userRes == (ctrl.Result{}) && userOS != nil {
-					delErr := applicationcredentials.Delete(userOS.GetOSClient(), userID, instance.Status.ACID).ExtractErr()
-					if delErr != nil {
-						logger.Error(delErr, "Failed to delete AC from Keystone", "ACID", instance.Status.ACID)
-					} else {
-						logger.Info("Deleted AC from Keystone", "ACID", instance.Status.ACID)
-					}
-				}
-			}
-		}
-	}
+	// if instance.Status.ACID != "" {
+	// 	keystoneAPI, err := keystonev1.GetKeystoneAPI(ctx, helperObj, instance.Namespace, nil)
+	// 	if err == nil && keystoneAPI.IsReady() {
+	// 		userID, userErr := r.findUserIDAsAdmin(ctx, helperObj, keystoneAPI, instance.Spec.UserName)
+	// 		if userErr != nil {
+	// 			return ctrl.Result{}, err
+	// 		}
+	// 		userOS, userRes, userErr2 := keystonev1.GetUserServiceClient(ctx, helperObj, keystoneAPI, instance.Spec.UserName, instance.Spec.Secret, instance.Spec.PasswordSelector)
+	// 		if userErr2 == nil && userRes == (ctrl.Result{}) && userOS != nil {
+	// 			delErr := applicationcredentials.Delete(userOS.GetOSClient(), userID, instance.Status.ACID).ExtractErr()
+	// 			if delErr != nil {
+	// 				logger.Error(delErr, "Failed to delete AC from Keystone", "ACID", instance.Status.ACID)
+	// 			} else {
+	// 				logger.Info("Deleted AC from Keystone", "ACID", instance.Status.ACID)
+	// 			}
+	// 		}
+	// 	}
+	// }
 
 	// Remove finalizer
 	const finalizer = "openstack.org/applicationcredential"
@@ -335,25 +339,45 @@ func (r *ApplicationCredentialReconciler) storeACSecret(
 // findUserIDAsAdmin uses admin-scoped token to look up user ID
 func (r *ApplicationCredentialReconciler) findUserIDAsAdmin(
 	ctx context.Context,
+	instance *keystonev1.ApplicationCredential,
 	helperObj *helper.Helper,
 	keystoneAPI *keystonev1.KeystoneAPI,
 	userName string,
-) (string, error) {
-
+) (string, ctrl.Result, error) {
 	logger := r.GetLogger(ctx)
+
+	// get admin-scoped client and set condition appropriately
 	adminOS, ctrlResult, err := keystonev1.GetAdminServiceClient(ctx, helperObj, keystoneAPI)
 	if err != nil {
-		return "", err
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			keystonev1.AdminServiceClientReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			keystonev1.AdminServiceClientReadyErrorMessage,
+			err.Error(),
+		))
+		return "", ctrl.Result{}, err
 	}
 	if ctrlResult != (ctrl.Result{}) {
-		return "", ErrAdminServiceClientNotReady
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			keystonev1.AdminServiceClientReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			keystonev1.AdminServiceClientReadyWaitingMessage,
+		))
+		return "", ctrlResult, nil
 	}
+	instance.Status.Conditions.MarkTrue(
+		keystonev1.AdminServiceClientReadyCondition,
+		keystonev1.AdminServiceClientReadyMessage,
+	)
 
+	// now actually look up the user
 	userObj, err := adminOS.GetUser(logger, userName, "Default")
 	if err != nil {
-		return "", fmt.Errorf("cannot find user %q: %w", userName, err)
+		return "", ctrl.Result{}, fmt.Errorf("cannot find user %q: %w", userName, err)
 	}
-	return userObj.ID, nil
+	return userObj.ID, ctrl.Result{}, nil
 }
 
 // computeNextRequeue schedules the next check to happen at "expiry - grace"
