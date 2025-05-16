@@ -286,16 +286,32 @@ func (r *ApplicationCredentialReconciler) createACWithName(
 	ac *keystonev1.ApplicationCredential,
 	newACName string,
 ) (string, string, time.Time, error) {
+	unres := ac.Spec.Unrestricted
+
+	roles := make([]applicationcredentials.Role, len(ac.Spec.Roles))
+	for i, rn := range ac.Spec.Roles {
+		roles[i] = applicationcredentials.Role{Name: rn}
+	}
+
+	rules := make([]applicationcredentials.AccessRule, 0, len(ac.Spec.AccessRules))
+	for _, ar := range ac.Spec.AccessRules {
+		if ar.Service == "" {
+			continue
+		}
+		rule := applicationcredentials.AccessRule{
+			Service: ar.Service,
+			Path:    ar.Path,
+			Method:  ar.Method,
+		}
+		rules = append(rules, rule)
+	}
+
 	createOpts := applicationcredentials.CreateOpts{
 		Name:         newACName,
 		Description:  fmt.Sprintf("Created by keystone-operator for user %s", ac.Spec.UserName),
-		Unrestricted: false,
-
-		// Always assign these roles:
-		Roles: []applicationcredentials.Role{
-			{Name: "admin"},
-			{Name: "service"},
-		},
+		Unrestricted: unres,
+		Roles:        roles,
+		AccessRules:  rules,
 	}
 
 	if ac.Spec.ExpirationDays > 0 {
@@ -308,12 +324,12 @@ func (r *ApplicationCredentialReconciler) createACWithName(
 		return "", "", time.Time{}, fmt.Errorf("failed to create AC for user %s: %w", ac.Spec.UserName, err)
 	}
 
-	actualExpires := created.ExpiresAt
 	logger.Info("Created AC in Keystone",
 		"ACID", created.ID,
 		"userID", userID,
-		"expiresAt", actualExpires)
-	return created.ID, created.Secret, actualExpires, nil
+		"expiresAt", created.ExpiresAt,
+	)
+	return created.ID, created.Secret, created.ExpiresAt, nil
 }
 
 func (r *ApplicationCredentialReconciler) storeACSecret(

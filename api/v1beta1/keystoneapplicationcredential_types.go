@@ -70,6 +70,14 @@ type ACRule struct {
 	// Service is the OpenStack service type
 	// +kubebuilder:validation:Optional
 	Service string `json:"service,omitempty"`
+
+	// Path is the API path to allow
+	// +kubebuilder:validation:Optional
+	Path string `json:"path,omitempty"`
+
+	// Method is the HTTP verb to allow (defaults to all if empty)
+	// +kubebuilder:validation:Optional
+	Method string `json:"method,omitempty"`
 }
 
 // ApplicationCredentialStatus defines the observed state
