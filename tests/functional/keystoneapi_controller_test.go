@@ -1949,7 +1949,7 @@ OIDCRedirectURI "{{ .KeystoneEndpointPublic }}/v3/auth/OS-FEDERATION/websso/open
 	When("A KeystoneAPI is created with a federatedRealmConfig", func() {
 		const (
 			inputSecretName  = "federation-test-secret"
-			mountPath        = "/etc/keystone/federation"
+			mountPath        = "/var/lib/config-data/default/multirealm-federation"
 			multiRealmSecret = "keystone-multirealm-federation-secret"
 		)
 
@@ -2078,7 +2078,7 @@ OIDCRedirectURI "{{ .KeystoneEndpointPublic }}/v3/auth/OS-FEDERATION/websso/open
 		})
 
 		It("should mount under the operator-default path", func() {
-			defaultMount := "/etc/httpd/conf"
+			defaultMount := "/var/lib/config-data/default/multirealm-federation"
 
 			d := th.GetDeployment(deploymentName)
 			container := d.Spec.Template.Spec.Containers[0]
