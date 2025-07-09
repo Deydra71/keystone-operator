@@ -68,7 +68,7 @@
         },
         {
             "source": "/var/lib/config-data/default/multirealm-federation/*",
-            "dest": "/etc/httpd/conf/multirealm/",
+            "dest": "/var/lib/httpd/metadata/",
             "owner": "keystone:apache",
             "perm": "0644",
             "optional": true,
@@ -88,8 +88,9 @@
             "recurse": true
         },
         {
-            "path": "/etc/httpd/conf/multirealm",
+            "path": "/var/lib/httpd/metadata",
             "owner": "keystone:apache",
+            "perm": "0775",
             "recurse": true
         }
     ]
