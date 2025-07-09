@@ -71,7 +71,8 @@
             "dest": "/etc/httpd/conf/multirealm/",
             "owner": "keystone:apache",
             "perm": "0644",
-            "optional": true
+            "optional": true,
+            "merge": true
         }
 
     ],
@@ -83,6 +84,11 @@
         },
         {
             "path": "/var/log/keystone",
+            "owner": "keystone:apache",
+            "recurse": true
+        },
+        {
+            "path": "/etc/httpd/conf/multirealm",
             "owner": "keystone:apache",
             "recurse": true
         }
