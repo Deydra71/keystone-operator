@@ -47,7 +47,7 @@ const (
 	// Container image fall-back defaults
 
 	// KeystoneAPIContainerImage is the fall-back container image for KeystoneAPI
-	KeystoneAPIContainerImage = "quay.io/podified-antelope-centos9/openstack-keystone:current-podified"
+	KeystoneAPIContainerImage = "quay.io/rh-ee-vfisarov/openstack-keystone@sha256:3dfd66922e33d8a70f0ff054c5a50291dba6b705ab8f8af6096cc5a449f8540c"
 
 	// APIDefaultTimeout default timeout for HAProxy, Apache
 	APIDefaultTimeout = 60

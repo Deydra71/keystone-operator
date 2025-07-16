@@ -12,4 +12,4 @@ spec:
       - name: manager
         env:
         - name: RELATED_IMAGE_KEYSTONE_API_IMAGE_URL_DEFAULT
-          value: quay.io/podified-antelope-centos9/openstack-keystone:current-podified
+          value: quay.io/rh-ee-vfisarov/openstack-keystone@sha256:3dfd66922e33d8a70f0ff054c5a50291dba6b705ab8f8af6096cc5a449f8540c
