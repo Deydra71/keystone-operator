@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack/identity/v3/applicationcredentials"
+	"github.com/gophercloud/gophercloud/openstack/identity/v3/tokens"
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
@@ -75,7 +76,6 @@ func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctr
 	if instance.Status.Conditions == nil {
 		cl := condition.CreateList(
 			condition.UnknownCondition(keystonev1.KeystoneAPIReadyCondition, condition.InitReason, keystonev1.KeystoneAPIReadyInitMessage),
-			condition.UnknownCondition(keystonev1.AdminServiceClientReadyCondition, condition.InitReason, keystonev1.AdminServiceClientReadyInitMessage),
 			condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
 		)
 		instance.Status.Conditions.Init(&cl)
@@ -162,23 +162,7 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 	if doRotate {
 		logger.Info(msg)
 
-		// Lookup the user ID
-		userID, ctrlResult, err := r.findUserIDAsAdmin(
-			ctx,
-			instance,
-			helperObj,
-			keystoneAPI,
-			instance.Spec.UserName,
-		)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if ctrlResult != (ctrl.Result{}) {
-			return ctrlResult, nil
-		}
-		logger.Info("Found user ID", "userName", instance.Spec.UserName, "userID", userID)
-
-		// Build a service‐scoped client
+		// Build a user-scoped client
 		userOS, userRes, userErr := keystonev1.GetUserServiceClient(
 			ctx, helperObj, keystoneAPI,
 			instance.Spec.UserName,
@@ -191,6 +175,20 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 		if userRes != (ctrl.Result{}) {
 			return userRes, nil
 		}
+
+		// Extract user ID from the authenticated token
+		userID, err := r.getUserIDFromToken(logger, userOS.GetOSClient(), instance.Spec.UserName)
+		if err != nil {
+			logger.Error(err, "Could not get user ID from token")
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				fmt.Sprintf("Failed to get user ID from token: %s", err.Error()),
+			))
+			return ctrl.Result{}, err
+		}
+		logger.Info("Found user ID from token", "userName", instance.Spec.UserName, "userID", userID)
 
 		// Create new AC in Keystone
 		newACName := fmt.Sprintf("%s-%s", instance.Name, randomSuffix(5))
@@ -334,48 +332,21 @@ func (r *ApplicationCredentialReconciler) storeACSecret(
 	return oko_secret.EnsureSecrets(ctx, helperObj, ac, tmpl, nil)
 }
 
-// findUserIDAsAdmin uses admin-scoped token to look up user ID
-func (r *ApplicationCredentialReconciler) findUserIDAsAdmin(
-	ctx context.Context,
-	instance *keystonev1.KeystoneApplicationCredential,
-	helperObj *helper.Helper,
-	keystoneAPI *keystonev1.KeystoneAPI,
-	userName string,
-) (string, ctrl.Result, error) {
-	logger := r.GetLogger(ctx)
+// getUserIDFromToken extracts the user ID from the authenticated token
+func (r *ApplicationCredentialReconciler) getUserIDFromToken(logger logr.Logger, identClient *gophercloud.ServiceClient, username string) (string, error) {
 
-	// get admin-scoped client and set condition appropriately
-	adminOS, ctrlResult, err := keystonev1.GetAdminServiceClient(ctx, helperObj, keystoneAPI)
+	// Get the authenticated user from the token
+	user, err := tokens.Get(identClient, identClient.TokenID).ExtractUser()
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			keystonev1.AdminServiceClientReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			keystonev1.AdminServiceClientReadyErrorMessage,
-			err.Error(),
-		))
-		return "", ctrl.Result{}, err
+		return "", fmt.Errorf("failed to extract user %s from token: %w", username, err)
 	}
-	if ctrlResult != (ctrl.Result{}) {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			keystonev1.AdminServiceClientReadyCondition,
-			condition.RequestedReason,
-			condition.SeverityInfo,
-			keystonev1.AdminServiceClientReadyWaitingMessage,
-		))
-		return "", ctrlResult, nil
-	}
-	instance.Status.Conditions.MarkTrue(
-		keystonev1.AdminServiceClientReadyCondition,
-		keystonev1.AdminServiceClientReadyMessage,
-	)
 
-	// now actually look up the user
-	userObj, err := adminOS.GetUser(logger, userName, "Default")
-	if err != nil {
-		return "", ctrl.Result{}, fmt.Errorf("cannot find user %q: %w", userName, err)
+	if user.ID == "" {
+		return "", fmt.Errorf("%w: user ID for user %s", util.ErrNotFound, username)
 	}
-	return userObj.ID, ctrl.Result{}, nil
+
+	logger.Info("Successfully extracted user ID from token", "userID", user.ID)
+	return user.ID, nil
 }
 
 // computeNextRequeue schedules the next check to happen at "expiry - grace"
