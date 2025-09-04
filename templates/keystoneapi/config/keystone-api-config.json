@@ -92,6 +92,12 @@
             "recurse": true
         },
         {
+            "path": "/var/lib/httpd",
+            "owner": "keystone:apache",
+            "perm": "0775",
+            "recurse": true
+        },
+        {
             "path": "/var/lib/httpd/metadata",
             "owner": "keystone:apache",
             "perm": "0775",
