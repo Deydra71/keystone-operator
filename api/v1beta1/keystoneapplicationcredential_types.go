@@ -36,6 +36,11 @@ type KeystoneApplicationCredentialSpec struct {
 	// UserName - the Keystone user under which this ApplicationCredential is created
 	UserName string `json:"userName"`
 
+	// DomainName - the Keystone domain of the user
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="Default"
+	DomainName string `json:"domainName,omitempty"`
+
 	// ExpirationDays sets the lifetime in days for the ApplicationCredential
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=365

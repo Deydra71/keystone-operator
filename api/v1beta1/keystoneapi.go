@@ -146,6 +146,7 @@ func GetUserServiceClient(
 	userName string,
 	secretName string,
 	passwordSelector string,
+	domainName string,
 ) (*openstack.OpenStack, ctrl.Result, error) {
 
 	authURL, err := keystoneAPI.GetEndpoint(endpoint.EndpointInternal)
@@ -188,9 +189,29 @@ func GetUserServiceClient(
 		return nil, res, nil
 	}
 
-	scope := &gophercloud.AuthScope{
-		ProjectName: "service",
-		DomainName:  "Default",
+	// Default to "Default" domain if not specified
+	if domainName == "" {
+		domainName = "Default"
+	}
+
+	// For Default domain, use project-scoped auth (service project exists)
+	// For other domains, use domain-scoped auth (no service project)
+	var scope *gophercloud.AuthScope
+	var tenantName string
+	
+	if domainName == "Default" {
+		// Project-scoped auth for Default domain users
+		scope = &gophercloud.AuthScope{
+			ProjectName: "service",
+			DomainName:  domainName,
+		}
+		tenantName = "service"
+	} else {
+		// Domain-scoped auth for users in other domains (like heat_stack_domain_admin)
+		scope = &gophercloud.AuthScope{
+			DomainName: domainName,
+		}
+		tenantName = ""
 	}
 
 	osClient, err := openstack.NewOpenStack(
@@ -200,8 +221,8 @@ func GetUserServiceClient(
 			AuthURL:    authURL,
 			Username:   userName,
 			Password:   password,
-			TenantName: "service",
-			DomainName: "Default",
+			TenantName: tenantName,
+			DomainName: domainName,
 			Region:     keystoneAPI.Spec.Region,
 			TLS:        tlsConfig,
 			Scope:      scope,

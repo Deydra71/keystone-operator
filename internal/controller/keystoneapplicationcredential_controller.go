@@ -209,6 +209,7 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 			instance.Spec.UserName,
 			instance.Spec.Secret,
 			instance.Spec.PasswordSelector,
+			instance.Spec.DomainName,
 		)
 		if userErr != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
