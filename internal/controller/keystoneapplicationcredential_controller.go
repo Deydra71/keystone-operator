@@ -64,7 +64,7 @@ type ApplicationCredentialReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile reconciles a KeystoneApplicationCredential resource.
-func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
 	logger := r.GetLogger(ctx)
 
 	// Fetch the ApplicationCredential CR
@@ -73,44 +73,28 @@ func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Add finalizer only if not deleting and not already present
-	if instance.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(instance, finalizer) {
-		base := instance.DeepCopy()
-		controllerutil.AddFinalizer(instance, finalizer)
-		if err := r.Patch(ctx, instance, client.MergeFrom(base)); err != nil {
-			if k8s_errors.IsConflict(err) {
-				return ctrl.Result{Requeue: true}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Initialize conditions on first pass
-	if instance.Status.Conditions == nil {
-		cl := condition.CreateList(
-			condition.UnknownCondition(keystonev1.KeystoneAPIReadyCondition, condition.InitReason, keystonev1.KeystoneAPIReadyInitMessage),
-			condition.UnknownCondition(keystonev1.KeystoneApplicationCredentialReadyCondition, condition.InitReason, keystonev1.KeystoneApplicationCredentialReadyInitMessage),
-			condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
-		)
-		instance.Status.Conditions.Init(&cl)
-		if err := r.Client.Status().Update(ctx, instance); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
 	// Setup helper for use in reconciles
 	helperObj, err := helper.NewHelper(instance, r.Client, r.Kclient, r.Scheme, logger)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Save and defer patching all subconditions and overall Ready
-	saved := instance.Status.Conditions.DeepCopy()
+	//
+	// initialize status
+	//
+	isNewInstance := instance.Status.Conditions == nil
+	if isNewInstance {
+		instance.Status.Conditions = condition.Conditions{}
+	}
+
+	// Save a copy of the condtions so that we can restore the LastTransitionTime
+	// when a condition's state doesn't change.
+	savedConditions := instance.Status.Conditions.DeepCopy()
+
+	// Always patch the instance status when exiting this function so we can persist any changes.
 	defer func() {
 		if instance.DeletionTimestamp.IsZero() {
-			condition.RestoreLastTransitionTimes(&instance.Status.Conditions, saved)
+			// Update the Ready condition based on the sub conditions
 			// ApplicationCredentialReady being True implies KeystoneAPIReady is True,
 			// so when ApplicationCredential is ready, setup is complete
 			if instance.Status.Conditions.IsTrue(keystonev1.KeystoneApplicationCredentialReadyCondition) {
@@ -119,9 +103,30 @@ func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctr
 				instance.Status.Conditions.MarkUnknown(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage)
 				instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
 			}
-			_ = helperObj.PatchInstance(ctx, instance)
+			condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
+			err := helperObj.PatchInstance(ctx, instance)
+			if err != nil {
+				_err = err
+				return
+			}
 		}
 	}()
+
+	//
+	// Conditions init
+	//
+	cl := condition.CreateList(
+		condition.UnknownCondition(keystonev1.KeystoneAPIReadyCondition, condition.InitReason, keystonev1.KeystoneAPIReadyInitMessage),
+		condition.UnknownCondition(keystonev1.KeystoneApplicationCredentialReadyCondition, condition.InitReason, keystonev1.KeystoneApplicationCredentialReadyInitMessage),
+		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
+	)
+	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
+
+	// If we're not deleting this and the service object doesn't have our finalizer, add it.
+	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, finalizer) || isNewInstance {
+		return ctrl.Result{}, nil
+	}
 
 	// Fetch KeystoneAPI
 	keystoneAPI, err := keystonev1.GetKeystoneAPI(ctx, helperObj, instance.Namespace, nil)
@@ -339,6 +344,11 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 	instance *keystonev1.KeystoneApplicationCredential,
 ) (ctrl.Result, error) {
 
+	// NOTE: We intentionally do NOT delete the ApplicationCredential from Keystone.
+	// This prevents breaking services (especially EDPM nodes) that are actively using these credentials.
+	// The AC will expire naturally based on its expiration time. If immediate cleanup is needed,
+	// operators can manually delete the AC from Keystone using: openstack application credential delete <ac-id>
+
 	// Before removing our CR finalizer, allow ApplicationCredential Secret to be deleted by removing its protection finalizer
 	if instance.Status.SecretName != "" {
 		key := types.NamespacedName{Namespace: instance.Namespace, Name: instance.Status.SecretName}
@@ -386,9 +396,6 @@ func (r *ApplicationCredentialReconciler) createACWithName(
 	// build any user-supplied rules (leave nil if none)
 	var rules []applicationcredentials.AccessRule
 	for _, ar := range ac.Spec.AccessRules {
-		if ar.Service == "" {
-			continue
-		}
 		rule := applicationcredentials.AccessRule{
 			Service: ar.Service,
 			Path:    ar.Path,
@@ -399,7 +406,7 @@ func (r *ApplicationCredentialReconciler) createACWithName(
 
 	createOpts := applicationcredentials.CreateOpts{
 		Name:         newACName,
-		Description:  fmt.Sprintf("Created by keystone-operator for user %s", ac.Spec.UserName),
+		Description:  fmt.Sprintf("Created by keystone-operator for AC CR %s/%s (user %s)", ac.Namespace, ac.Name, ac.Spec.UserName),
 		Unrestricted: unres,
 		Roles:        roles,
 	}
@@ -434,8 +441,8 @@ func (r *ApplicationCredentialReconciler) storeACSecret(
 ) error {
 
 	data := map[string]string{
-		"AC_ID":     newID,
-		"AC_SECRET": newSecret,
+		keystonev1.ACIDSecretKey:     newID,
+		keystonev1.ACSecretSecretKey: newSecret,
 	}
 
 	// Add application-credentials label

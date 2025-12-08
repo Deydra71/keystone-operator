@@ -149,13 +149,13 @@ data:
 AC in Keystone side:
 ```
 openstack application credential show 7b23dbac20bc4f048f937415c84bb329
-+--------------+------------------------------------------------+
-| Field        | Value                                          |
-+--------------+------------------------------------------------+
-| description  | Created by keystone-operator for user barbican |
-| expires_at   | 2026-05-29T09:02:28.705012                     |
-| id           | 7b23dbac20bc4f048f937415c84bb329               |
-| name         | ac-barbican-29090                              |
++--------------+------------------------------------------------------------------------+
+| Field        | Value                                                                  |
++--------------+------------------------------------------------------------------------+
+| description  | Created by keystone-operator for AC CR openstack/ac-barbican (user... |
+| expires_at   | 2026-05-29T09:02:28.705012                                             |
+| id           | 7b23dbac20bc4f048f937415c84bb329                                       |
+| name         | ac-barbican-29090                                                      |
 | project_id   | 24f05745bc2145c6a625b528ce21d7a3               |
 | roles        | service                                        |
 | system       | None                                           |
@@ -185,11 +185,33 @@ When the next reconcile hits the grace window (`now ≥ expiresAt - gracePeriodD
   - Schedules the next check at `(newExpiresAt - gracePeriodDays)`
 
 ## Manual Rotation
-Manual rotation can be triggered by patching the AC CR with an expiration timestamp in the past, e.g.:
 
-`oc patch -n openstack keystoneapplicationcredential ac-barbican --type=merge --subresource=status -p '{"status":{"expiresAt":"2001-05-19T00:00:00Z"}}'`
+Manual rotation can be triggered by patching the AC CR with an expiration timestamp in the past:
 
-Note: Deleting the AC CR itself does NOT trigger rotation; instead, it triggers cleanup and causes services to immediately fallback to password authentication. By patching just the expiration timestamp, rotation occurs without triggering a fallback.
+```bash
+oc patch -n openstack keystoneapplicationcredential ac-barbican \
+  --type=merge --subresource=status \
+  -p '{"status":{"expiresAt":"2001-05-19T00:00:00Z"}}'
+```
+
+This triggers seamless rotation with one pod restart and no authentication fallback.
+
+**Note:** Deleting the AC CR itself also triggers rotation, but causes a brief fallback to password authentication while the openstack-operator recreates the AC CR. This results in two pod restarts instead of one, because the service authentication type is based on the presence of AC Secret.
+
+## ApplicationCredential Lifecycle and Cleanup
+
+ApplicationCredentials in Keystone are **not automatically deleted** by the controller. This design decision prevents disrupting running services, especially EDPM nodes that actively use these credentials.
+
+**Cleanup behavior:**
+- **During rotation:** The old AC remains in Keystone and expires naturally based on its `expiresAt` timestamp. The new AC is created with fresh credentials.
+- **When AC CR is deleted:** The ApplicationCredential remains in Keystone and continues to be valid until natural expiration.
+- **Manual cleanup:** If immediate cleanup is required, operators can manually delete the AC from Keystone:
+
+```bash
+openstack application credential delete <ac-id>
+```
+
+This approach ensures that deleting the AC CR (intentionally or accidentally) does not cause immediate authentication failures across the control plane and EDPM deployments.
 
 ## Client-Side Helper Functions
 

@@ -219,12 +219,6 @@ func getPasswordFromOSPSecret(
 	h *helper.Helper,
 	ospSecretName, passwordSelector string,
 ) (string, ctrl.Result, error) {
-	if ospSecretName == "" {
-		return "", ctrl.Result{}, fmt.Errorf("secret name is empty, cannot retrieve password for selector %q", passwordSelector)
-	}
-	if passwordSelector == "" {
-		return "", ctrl.Result{}, fmt.Errorf("password selector is empty, cannot retrieve password from secret %q", ospSecretName)
-	}
 	data, res, err := secret.GetDataFromSecret(
 		ctx,
 		h,

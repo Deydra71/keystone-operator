@@ -48,6 +48,13 @@ func GetACCRName(serviceName string) string {
 	return fmt.Sprintf("ac-%s", serviceName)
 }
 
+const (
+	// ACIDSecretKey is the key for the ApplicationCredential ID in the Secret
+	ACIDSecretKey = "AC_ID"
+	// ACSecretSecretKey is the key for the ApplicationCredential secret in the Secret
+	ACSecretSecretKey = "AC_SECRET"
+)
+
 var (
 	// ErrACIDMissing indicates AC_ID key missing or empty in the Secret
 	ErrACIDMissing = errors.New("applicationcredential secret missing AC_ID")
@@ -71,11 +78,11 @@ func GetApplicationCredentialFromSecret(
 		return nil, fmt.Errorf("get applicationcredential secret %s: %w", key, err)
 	}
 
-	acID, okID := secret.Data["AC_ID"]
+	acID, okID := secret.Data[ACIDSecretKey]
 	if !okID || len(acID) == 0 {
 		return nil, fmt.Errorf("%w: %s", ErrACIDMissing, key.String())
 	}
-	acSecret, okSecret := secret.Data["AC_SECRET"]
+	acSecret, okSecret := secret.Data[ACSecretSecretKey]
 	if !okSecret || len(acSecret) == 0 {
 		return nil, fmt.Errorf("%w: %s", ErrACSecretMissing, key.String())
 	}
@@ -100,7 +107,7 @@ func VerifyApplicationCredentialsForService(
 	hash, res, err := secret.VerifySecret(
 		ctx,
 		secretKey,
-		[]string{"AC_ID", "AC_SECRET"},
+		[]string{ACIDSecretKey, ACSecretSecretKey},
 		c,
 		timeout,
 	)

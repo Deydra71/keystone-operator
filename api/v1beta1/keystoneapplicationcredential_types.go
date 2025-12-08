@@ -27,10 +27,12 @@ type KeystoneApplicationCredentialSpec struct {
 
 	// Secret containing service user password
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Secret string `json:"secret"`
 
 	// PasswordSelector for extracting the service password
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	PasswordSelector string `json:"passwordSelector"`
 
 	// UserName - the Keystone user under which this ApplicationCredential is created
@@ -63,19 +65,22 @@ type KeystoneApplicationCredentialSpec struct {
 	AccessRules []ACRule `json:"accessRules,omitempty"`
 }
 
-// ACRule defines a additional access rule for an ApplicationCredential
+// ACRule defines an access rule for an ApplicationCredential
 type ACRule struct {
 	// Service is the OpenStack service type
-	// +kubebuilder:validation:Optional
-	Service string `json:"service,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Service string `json:"service"`
 
 	// Path is the API path to allow
-	// +kubebuilder:validation:Optional
-	Path string `json:"path,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Path string `json:"path"`
 
-	// Method is the HTTP verb to allow (defaults to all if empty)
-	// +kubebuilder:validation:Optional
-	Method string `json:"method,omitempty"`
+	// Method is the HTTP verb to allow
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Method string `json:"method"`
 }
 
 // KeystoneApplicationCredentialStatus defines the observed state
@@ -102,6 +107,9 @@ type KeystoneApplicationCredentialStatus struct {
 
 	// LastRotated - timestamp when credentials were last rotated
 	LastRotated *metav1.Time `json:"lastRotated,omitempty"`
+
+	// ObservedGeneration - the most recent generation observed for this ApplicationCredential.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 //+kubebuilder:object:root=true
