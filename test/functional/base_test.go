@@ -31,6 +31,7 @@ import (
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
 	keystone_base "github.com/openstack-k8s-operators/keystone-operator/internal/keystone"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	dataplanev1 "github.com/openstack-k8s-operators/openstack-operator/api/dataplane/v1beta1"
 )
 
 func GetKeystoneAPISpec(fernetMaxKeys int32) map[string]any {
@@ -332,4 +333,57 @@ func GetApplicationCredential(name types.NamespacedName) *keystonev1.KeystoneApp
 func ACConditionGetter(name types.NamespacedName) condition.Conditions {
 	instance := GetApplicationCredential(name)
 	return instance.Status.Conditions
+}
+
+// NodeSet helper functions
+
+// CreateNodeSet creates an OpenStackDataPlaneNodeSet with the given number of
+// nodes and SecretDeployment status. Use allUpdated=false with updatedNodes < totalNodes
+// to simulate an incomplete EDPM deployment.
+func CreateNodeSet(name types.NamespacedName, totalNodes int, allUpdated bool, updatedNodes int) *dataplanev1.OpenStackDataPlaneNodeSet {
+	nodes := make(map[string]dataplanev1.NodeSection, totalNodes)
+	for i := range totalNodes {
+		nodes[fmt.Sprintf("compute-%d", i)] = dataplanev1.NodeSection{}
+	}
+
+	nodeset := &dataplanev1.OpenStackDataPlaneNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name.Name,
+			Namespace: name.Namespace,
+		},
+		Spec: dataplanev1.OpenStackDataPlaneNodeSetSpec{
+			PreProvisioned: true,
+			Nodes:          nodes,
+			NodeTemplate:   dataplanev1.NodeTemplate{},
+		},
+	}
+	Expect(k8sClient.Create(ctx, nodeset)).To(Succeed())
+
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, nodeset)).To(Succeed())
+	}, timeout, interval).Should(Succeed())
+
+	nodeset.Status.SecretDeployment = &dataplanev1.SecretDeploymentStatus{
+		AllNodesUpdated: allUpdated,
+		TotalNodes:      totalNodes,
+		UpdatedNodes:    updatedNodes,
+	}
+	Expect(k8sClient.Status().Update(ctx, nodeset)).To(Succeed())
+
+	return nodeset
+}
+
+// UpdateNodeSetStatus patches the SecretDeployment status on an existing NodeSet.
+func UpdateNodeSetStatus(name types.NamespacedName, allUpdated bool, updatedNodes, totalNodes int) {
+	nodeset := &dataplanev1.OpenStackDataPlaneNodeSet{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, nodeset)).To(Succeed())
+	}, timeout, interval).Should(Succeed())
+
+	nodeset.Status.SecretDeployment = &dataplanev1.SecretDeploymentStatus{
+		AllNodesUpdated: allUpdated,
+		TotalNodes:      totalNodes,
+		UpdatedNodes:    updatedNodes,
+	}
+	Expect(k8sClient.Status().Update(ctx, nodeset)).To(Succeed())
 }

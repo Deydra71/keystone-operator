@@ -38,9 +38,11 @@ import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	mariadb_test "github.com/openstack-k8s-operators/mariadb-operator/api/test/helpers"
 	mariadbv1 "github.com/openstack-k8s-operators/mariadb-operator/api/v1beta1"
+	dataplanev1 "github.com/openstack-k8s-operators/openstack-operator/api/dataplane/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -2785,6 +2787,197 @@ OIDCRedirectURI "{{ .KeystoneEndpointPublic }}/v3/auth/OS-FEDERATION/websso/open
 			err := k8sClient.Create(ctx, obj)
 			Expect(err).To(HaveOccurred(), "Expected creation to fail due to validation constraint")
 			Expect(err.Error()).To(ContainSubstring("gracePeriodDays must be smaller than expirationDays"))
+		})
+	})
+
+	When("EDPM-aware AC cleanup is tested", func() {
+		// NOTE: The EDPM guard logic in cleanupUnusedRotatedSecrets is covered by unit
+		// tests in keystoneapplicationcredential_nodeset_test.go. These functional
+		// tests focus on the delete path (reconcileDelete), which is called even
+		// without a KeystoneAPI and exercises the EDPM-aware revocation-skip logic.
+
+		It("should strip protection finalizers on delete for ac-nova even when EDPM nodes are pending", func() {
+			userSecret := CreateACServiceUserSecret(namespace)
+
+			acName := types.NamespacedName{Name: "ac-nova", Namespace: namespace}
+			CreateACWithSpec(acName, GetDefaultACSpec("nova", userSecret.Name))
+			WaitForACFinalizer(acName)
+
+			// Create protected secrets (current + old rotated) for nova
+			currentSecretName := types.NamespacedName{Name: "ac-nova-aaaaa-secret", Namespace: namespace}
+			oldSecretName := types.NamespacedName{Name: "ac-nova-bbbbb-secret", Namespace: namespace}
+			CreateProtectedACSecret(currentSecretName, "nova")
+			CreateProtectedACSecret(oldSecretName, "nova")
+
+			Eventually(func(g Gomega) {
+				ac := &keystonev1.KeystoneApplicationCredential{}
+				g.Expect(k8sClient.Get(ctx, acName, ac)).To(Succeed())
+				ac.Status.ACID = "aaaaa-fake-id"
+				ac.Status.SecretName = currentSecretName.Name
+				ac.Status.PreviousSecretName = oldSecretName.Name
+				g.Expect(k8sClient.Status().Update(ctx, ac)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Nodeset with incomplete deployment — EDPM nodes are NOT ready
+			nodesetName := types.NamespacedName{Name: "edpm-nodeset", Namespace: namespace}
+			CreateNodeSet(nodesetName, 3, false, 1)
+
+			// Delete the AC CR — reconcileDelete should still proceed:
+			// revocation is skipped but finalizers are removed so the CR is not blocked
+			DeleteACCR(acName)
+			WaitForACGone(acName)
+
+			// Both secrets must have their protection finalizer removed
+			Eventually(func(g Gomega) {
+				for _, sName := range []types.NamespacedName{currentSecretName, oldSecretName} {
+					s := &corev1.Secret{}
+					g.Expect(k8sClient.Get(ctx, sName, s)).To(Succeed())
+					g.Expect(s.Finalizers).NotTo(ContainElement(ACSecretProtectionFinalizer),
+						"secret %s should have protection finalizer removed during delete even with pending EDPM nodes", sName.Name)
+				}
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should strip protection finalizers on delete for ac-ceilometer even when EDPM nodes are pending", func() {
+			userSecret := CreateACServiceUserSecret(namespace)
+
+			acName := types.NamespacedName{Name: "ac-ceilometer", Namespace: namespace}
+			CreateACWithSpec(acName, GetDefaultACSpec("ceilometer", userSecret.Name))
+			WaitForACFinalizer(acName)
+
+			secretName := types.NamespacedName{Name: "ac-ceilometer-ccccc-secret", Namespace: namespace}
+			CreateProtectedACSecret(secretName, "ceilometer")
+
+			Eventually(func(g Gomega) {
+				ac := &keystonev1.KeystoneApplicationCredential{}
+				g.Expect(k8sClient.Get(ctx, acName, ac)).To(Succeed())
+				ac.Status.ACID = "ccccc-fake-id"
+				ac.Status.SecretName = secretName.Name
+				g.Expect(k8sClient.Status().Update(ctx, ac)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Nodeset with no nodes updated
+			nodesetName := types.NamespacedName{Name: "edpm-nodeset", Namespace: namespace}
+			CreateNodeSet(nodesetName, 3, false, 0)
+
+			DeleteACCR(acName)
+			WaitForACGone(acName)
+
+			Eventually(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, secretName, s)).To(Succeed())
+				g.Expect(s.Finalizers).NotTo(ContainElement(ACSecretProtectionFinalizer),
+					"ceilometer secret should have protection finalizer removed during delete")
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should handle ac-nova deletion normally when no nodesets exist", func() {
+			userSecret := CreateACServiceUserSecret(namespace)
+
+			acName := types.NamespacedName{Name: "ac-nova", Namespace: namespace}
+			CreateACWithSpec(acName, GetDefaultACSpec("nova", userSecret.Name))
+			WaitForACFinalizer(acName)
+
+			secretName := types.NamespacedName{Name: "ac-nova-ddddd-secret", Namespace: namespace}
+			CreateProtectedACSecret(secretName, "nova")
+
+			Eventually(func(g Gomega) {
+				ac := &keystonev1.KeystoneApplicationCredential{}
+				g.Expect(k8sClient.Get(ctx, acName, ac)).To(Succeed())
+				ac.Status.ACID = "ddddd-fake-id"
+				ac.Status.SecretName = secretName.Name
+				g.Expect(k8sClient.Status().Update(ctx, ac)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// No nodesets in the namespace — EDPM is not deployed, revocation is NOT skipped
+			DeleteACCR(acName)
+			WaitForACGone(acName)
+
+			Eventually(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, secretName, s)).To(Succeed())
+				g.Expect(s.Finalizers).NotTo(ContainElement(ACSecretProtectionFinalizer),
+					"nova secret should have protection finalizer removed when no EDPM nodesets exist")
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should handle non-EDPM AC deletion normally regardless of nodeset status", func() {
+			userSecret := CreateACServiceUserSecret(namespace)
+
+			acName := types.NamespacedName{Name: "ac-barbican", Namespace: namespace}
+			CreateACWithSpec(acName, GetDefaultACSpec("barbican", userSecret.Name))
+			WaitForACFinalizer(acName)
+
+			secretName := types.NamespacedName{Name: "ac-barbican-eeeee-secret", Namespace: namespace}
+			CreateProtectedACSecret(secretName, "barbican")
+
+			Eventually(func(g Gomega) {
+				ac := &keystonev1.KeystoneApplicationCredential{}
+				g.Expect(k8sClient.Get(ctx, acName, ac)).To(Succeed())
+				ac.Status.ACID = "eeeee-fake-id"
+				ac.Status.SecretName = secretName.Name
+				g.Expect(k8sClient.Status().Update(ctx, ac)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Nodeset with incomplete updates — should NOT affect non-EDPM ACs like barbican
+			nodesetName := types.NamespacedName{Name: "edpm-nodeset", Namespace: namespace}
+			CreateNodeSet(nodesetName, 3, false, 1)
+
+			DeleteACCR(acName)
+			WaitForACGone(acName)
+
+			Eventually(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, secretName, s)).To(Succeed())
+				g.Expect(s.Finalizers).NotTo(ContainElement(ACSecretProtectionFinalizer),
+					"barbican secret should have protection finalizer removed — EDPM status is irrelevant for non-EDPM ACs")
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should strip protection finalizers on delete for ac-nova when nodeset has nil SecretDeployment", func() {
+			userSecret := CreateACServiceUserSecret(namespace)
+
+			acName := types.NamespacedName{Name: "ac-nova", Namespace: namespace}
+			CreateACWithSpec(acName, GetDefaultACSpec("nova", userSecret.Name))
+			WaitForACFinalizer(acName)
+
+			secretName := types.NamespacedName{Name: "ac-nova-fffff-secret", Namespace: namespace}
+			CreateProtectedACSecret(secretName, "nova")
+
+			Eventually(func(g Gomega) {
+				ac := &keystonev1.KeystoneApplicationCredential{}
+				g.Expect(k8sClient.Get(ctx, acName, ac)).To(Succeed())
+				ac.Status.ACID = "fffff-fake-id"
+				ac.Status.SecretName = secretName.Name
+				g.Expect(k8sClient.Status().Update(ctx, ac)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Create a nodeset but don't set SecretDeployment status (nil)
+			// This simulates the period before the nodeset controller initializes tracking
+			nodesetName := types.NamespacedName{Name: "edpm-nodeset", Namespace: namespace}
+			nodeset := &dataplanev1.OpenStackDataPlaneNodeSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      nodesetName.Name,
+					Namespace: nodesetName.Namespace,
+				},
+				Spec: dataplanev1.OpenStackDataPlaneNodeSetSpec{
+					PreProvisioned: true,
+					Nodes:          map[string]dataplanev1.NodeSection{"compute-0": {}},
+					NodeTemplate:   dataplanev1.NodeTemplate{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nodeset)).To(Succeed())
+
+			// Delete AC CR — should succeed, revocation skipped for safety
+			DeleteACCR(acName)
+			WaitForACGone(acName)
+
+			Eventually(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, secretName, s)).To(Succeed())
+				g.Expect(s.Finalizers).NotTo(ContainElement(ACSecretProtectionFinalizer),
+					"nova secret should have protection finalizer removed even with uninitialized nodeset tracking")
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 })

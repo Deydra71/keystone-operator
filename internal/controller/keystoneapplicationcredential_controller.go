@@ -33,6 +33,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
+	dataplanev1 "github.com/openstack-k8s-operators/openstack-operator/api/dataplane/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,14 +47,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const acSecretFinalizer = "openstack.org/ac-secret-protection" // #nosec G101
 const finalizer = "openstack.org/applicationcredential"        // #nosec G101
 
-var errACIDMismatch = fmt.Errorf("AC secret already exists with a different ACID")
+// EDPMCheckInterval is the fallback requeue interval when EDPM nodeset checks block
+// application credential cleanup. The primary notification path is the NodeSet watch,
+// this interval is a safety net in case the watch event is lost or delayed.
+const EDPMCheckInterval = 5 * time.Minute
+
+// EDPMGracePeriod is the default time to wait before allowing cleanup despite check failures.
+// This prevents indefinite blocking on transient API errors or uninitialized tracking.
+const EDPMGracePeriod = 1 * time.Hour
+
+var errACIDMismatch = fmt.Errorf("application credential secret already exists with a different ACID")
+var errEDPMTrackingUninitialized = fmt.Errorf("cannot verify EDPM credential safety: secret tracking may not be initialized yet")
 
 // ApplicationCredentialReconciler reconciles an ApplicationCredential object
 type ApplicationCredentialReconciler struct {
@@ -70,6 +83,7 @@ type ApplicationCredentialReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=delete
 //+kubebuilder:rbac:groups=core,resources=secrets/finalizers,verbs=get;list;create;update;delete;patch
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=dataplane.openstack.org,resources=openstackdataplanenodesets,verbs=get;list;watch
 
 // Reconcile reconciles a KeystoneApplicationCredential resource.
 func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -300,24 +314,28 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 			// The Keystone AC was already created above but its secret cannot be stored.
 			// Revoke it so it doesn't become a permanently orphaned credential in Keystone.
 			if revokeErr := revokeKeystoneAC(ctx, userOS.GetOSClient(), userID, newID); revokeErr != nil {
-				logger.Error(revokeErr, "Failed to revoke orphaned Keystone AC after secret creation failure", "ACID", newID)
+				logger.Error(revokeErr, "Failed to revoke orphaned Keystone application credential after secret creation failure", "ACID", newID)
 			} else {
-				logger.Info("Revoked orphaned Keystone AC after secret creation failure", "ACID", newID)
+				logger.Info("Revoked orphaned Keystone application credential after secret creation failure", "ACID", newID)
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				keystonev1.KeystoneApplicationCredentialReadyCondition,
 				condition.ErrorReason,
 				condition.SeverityWarning,
 				keystonev1.KeystoneApplicationCredentialReadyErrorMessage,
-				fmt.Sprintf("Failed to create AC secret: %s", err.Error()),
+				fmt.Sprintf("Failed to create application credential secret: %s", err.Error()),
 			))
 			return ctrl.Result{}, err
 		}
 
-		// Capture previous expiration before updating status (for rotation event)
+		// Capture previous ACID and expiration before updating status (for rotation event)
+		var previousACID string
 		var previousExpiresAt string
-		if isRotation && instance.Status.ExpiresAt != nil {
-			previousExpiresAt = instance.Status.ExpiresAt.Format(time.RFC3339)
+		if isRotation {
+			previousACID = instance.Status.ACID
+			if instance.Status.ExpiresAt != nil {
+				previousExpiresAt = instance.Status.ExpiresAt.Format(time.RFC3339)
+			}
 		}
 
 		// Update status, capture previous secret before rotation for rollback tracking
@@ -348,21 +366,24 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 			now := metav1.Now()
 			instance.Status.LastRotated = &now
 
-			// Emit event for EDPM visibility
-			r.EventRecorder.Event(
-				instance,
-				corev1.EventTypeNormal,
-				"ApplicationCredentialRotated",
-				fmt.Sprintf("ApplicationCredential '%s' (user: %s) rotated - EDPM nodes may need credential updates. Previous expiration: %s, New expiration: %s",
-					instance.Name, instance.Spec.UserName, previousExpiresAt, expiresAt.Format(time.RFC3339)),
-			)
+			var eventMsg string
+			if isEDPMConsumerAC(instance.Name) {
+				eventMsg = fmt.Sprintf(
+					"Application credential '%s' (user: %s) rotated. Old credential (ID: %s, expires: %s) will not be revoked until all EDPM nodes are updated. New credential ID: %s, expires: %s",
+					instance.Name, instance.Spec.UserName, previousACID, previousExpiresAt, newID, expiresAt.Format(time.RFC3339))
+			} else {
+				eventMsg = fmt.Sprintf(
+					"Application credential '%s' (user: %s) rotated. Old credential ID: %s (expired: %s). New credential ID: %s, expires: %s",
+					instance.Name, instance.Spec.UserName, previousACID, previousExpiresAt, newID, expiresAt.Format(time.RFC3339))
+			}
+			r.EventRecorder.Event(instance, corev1.EventTypeNormal, "ApplicationCredentialRotated", eventMsg)
 
-			logger.Info("ApplicationCredential rotated", "serviceName", instance.Spec.UserName)
+			logger.Info("Application credential rotated", "serviceName", instance.Spec.UserName, "oldACID", previousACID, "newACID", newID)
 		} else {
-			logger.Info("ApplicationCredential created", "serviceName", instance.Spec.UserName)
+			logger.Info("Application credential created", "serviceName", instance.Spec.UserName, "ACID", newID)
 		}
 
-		logger.Info("ApplicationCredential ready", "secret", secretName, "ACID", newID, "expiresAt", expiresAt)
+		logger.Info("Application credential ready", "secret", secretName, "ACID", newID, "expiresAt", expiresAt)
 
 		// Return early after creation/rotation so the defer patches the status.
 		// The status patch triggers a re-reconcile via the For() watch, at which
@@ -399,23 +420,26 @@ func (r *ApplicationCredentialReconciler) reconcileNormal(
 		instance.Spec.Secret,
 		instance.Spec.PasswordSelector,
 	)
+	var cleanupResult ctrl.Result
 	if userErr != nil {
-		logger.Info("Could not build Keystone client; skipping unused rotated AC secret cleanup", "error", userErr)
+		logger.Info("Could not build Keystone client; skipping unused rotated application credential secret cleanup", "error", userErr)
 	} else if userRes != (ctrl.Result{}) {
-		logger.Info("Keystone client not ready; skipping unused rotated AC secret cleanup")
+		logger.Info("Keystone client not ready; skipping unused rotated application credential secret cleanup")
 	} else {
 		userID, err := r.getUserIDFromToken(ctx, userOS.GetOSClient(), instance.Spec.UserName)
 		if err != nil {
-			logger.Info("Could not get user ID; skipping unused rotated AC secret cleanup", "error", err)
+			logger.Info("Could not get user ID; skipping unused rotated application credential secret cleanup", "error", err)
 		} else {
-			if err := r.cleanupUnusedRotatedSecrets(ctx, instance, helperObj, userOS.GetOSClient(), userID); err != nil {
-				logger.Error(err, "Unused rotated AC secret cleanup failed, will retry on next reconcile")
+			res, err := r.cleanupUnusedRotatedSecrets(ctx, instance, helperObj, userOS.GetOSClient(), userID)
+			if err != nil {
+				logger.Error(err, "Unused rotated application credential secret cleanup failed, will retry on next reconcile")
 			}
+			cleanupResult = res
 		}
 	}
 
 	instance.Status.Conditions.MarkTrue(keystonev1.KeystoneApplicationCredentialReadyCondition, keystonev1.KeystoneApplicationCredentialReadyMessage)
-	return ctrl.Result{}, nil
+	return cleanupResult, nil
 }
 
 // reconcileDelete runs when the AC CR is deleted (removed from OpenStackControlPlane or manually)
@@ -427,7 +451,7 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 	keystoneAPI *keystonev1.KeystoneAPI,
 ) (ctrl.Result, error) {
 	logger := r.GetLogger(ctx)
-	logger.Info("Reconciling ApplicationCredential delete")
+	logger.Info("Reconciling application credential delete")
 
 	serviceName := strings.TrimPrefix(instance.Name, "ac-")
 
@@ -449,10 +473,27 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 		return ctrl.Result{}, err
 	}
 
+	// For EDPM consumers, check whether EDPM nodes are still using old credentials.
+	// If so, skip Keystone revocation (the AC expires naturally) but still strip
+	// protection finalizers so the CR deletion is not blocked.
+	skipRevocation := false
+	if isEDPMConsumerAC(instance.Name) {
+		stillInUse, info, err := r.isACStillInUseByNodeSets(ctx, instance.Namespace)
+		if err != nil {
+			logger.Info("EDPM nodeset check failed during delete, skipping Keystone revocation for safety", "error", err)
+			skipRevocation = true
+		} else if stillInUse {
+			logger.Info("EDPM nodes still using credentials, skipping Keystone revocation during delete — application credential will expire naturally", "info", info)
+			skipRevocation = true
+		}
+	}
+
 	// Build a Keystone client for best-effort revocation (nil if unavailable)
 	var identClient *gophercloud.ServiceClient
 	var userID string
-	if keystoneAPI != nil {
+	if skipRevocation {
+		logger.Info("Keystone revocation skipped for EDPM safety, stripping protection finalizers only")
+	} else if keystoneAPI != nil {
 		userOS, userRes, userErr := keystonev1.GetUserServiceClient(
 			ctx, helperObj, keystoneAPI,
 			instance.Spec.UserName,
@@ -460,15 +501,15 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 			instance.Spec.PasswordSelector,
 		)
 		if userErr != nil || userRes != (ctrl.Result{}) {
-			logger.Info("Could not build Keystone client, skipping revocation during AC CR delete", "error", userErr)
+			logger.Info("Could not build Keystone client, skipping revocation during application credential CR delete", "error", userErr)
 		} else if uid, err := r.getUserIDFromToken(ctx, userOS.GetOSClient(), instance.Spec.UserName); err != nil {
-			logger.Info("Could not get user ID, skipping revocation during AC CR delete", "error", err)
+			logger.Info("Could not get user ID, skipping revocation during application credential CR delete", "error", err)
 		} else {
 			identClient = userOS.GetOSClient()
 			userID = uid
 		}
 	} else {
-		logger.Info("KeystoneAPI not present, skipping Keystone revocation during AC CR delete")
+		logger.Info("KeystoneAPI not present, skipping Keystone revocation during application credential CR delete")
 	}
 
 	// Single pass: revoke ACs in Keystone (best-effort) and strip protection finalizers
@@ -483,15 +524,15 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 			if acID != "" && !seen[acID] {
 				seen[acID] = true
 				if err := revokeKeystoneAC(ctx, identClient, userID, acID); err != nil {
-					logger.Info("Keystone revocation failed during AC CR delete, continuing", "ACID", acID, "error", err)
+					logger.Info("Keystone revocation failed during application credential CR delete, continuing", "ACID", acID, "error", err)
 				} else {
-					logger.Info("Revoked AC in Keystone during AC CR delete", "ACID", acID)
+					logger.Info("Revoked application credential in Keystone during CR delete", "ACID", acID)
 				}
 			}
 		}
 
 		if controllerutil.RemoveFinalizer(s, acSecretFinalizer) {
-			logger.Info("Removing protection finalizer from AC secret", "secret", s.Name)
+			logger.Info("Removing protection finalizer from application credential secret", "secret", s.Name)
 			if err := helperObj.GetClient().Update(ctx, s); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -513,7 +554,7 @@ func (r *ApplicationCredentialReconciler) reconcileDelete(
 			return ctrl.Result{}, err
 		}
 		if controllerutil.RemoveFinalizer(fallbackSecret, acSecretFinalizer) {
-			logger.Info("Removing protection finalizer from status-referenced AC secret", "secret", sn)
+			logger.Info("Removing protection finalizer from status-referenced application credential secret", "secret", sn)
 			if err := helperObj.GetClient().Update(ctx, fallbackSecret); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -562,18 +603,11 @@ func (r *ApplicationCredentialReconciler) ensureServiceLabel(
 
 // hasConsumerFinalizer returns true if the secret has any finalizer matching the AC consumer convention (suffix: -ac-consumer)
 //
-// Currently the controlplane service operators (barbican, cinder, etc.) place
-// finalizers like "openstack.org/barbican-ac-consumer" on the AC secret they
-// are actively using
-//
-// TODO(OSPRH-28176): EDPM services (nova, ceilometer, aodh) that consume AC
-// secrets on dataplane nodes must also place an EDPM-scoped consumer finalizer
-// (e.g. "openstack.org/edpm-nova-ac-consumer") on the secret. This will
-// prevent the keystone-operator from revoking/deleting a secret that is still
-// deployed to dataplane nodes that have not yet been updated. The EDPM
-// finalizer should only be removed once all nodes across all NodeSets have
-// been redeployed with the new credentials. This depends on per-node secret
-// rotation tracking: https://github.com/openstack-k8s-operators/openstack-operator/pull/1781
+// Control-plane service operators (barbican, cinder, nova, ceilometer, etc.)
+// place finalizers like "openstack.org/barbican-ac-consumer" on the AC secret
+// they are actively using. For EDPM-consuming services (nova, ceilometer),
+// the control-plane finalizer is managed normally, while EDPM safety is
+// enforced separately by isACStillInUseByNodeSets().
 func hasConsumerFinalizer(secret *corev1.Secret) bool {
 	for _, f := range secret.Finalizers {
 		if strings.HasPrefix(f, "openstack.org/") && strings.HasSuffix(f, "-ac-consumer") {
@@ -583,25 +617,108 @@ func hasConsumerFinalizer(secret *corev1.Secret) bool {
 	return false
 }
 
+// isEDPMConsumerAC returns true if the AC CR serves a service whose credentials
+// are deployed to EDPM (dataplane) nodes. Only these ACs require NodeSet status
+// checks before revocation/deletion.
+func isEDPMConsumerAC(acName string) bool {
+	return acName == "ac-nova" || acName == "ac-ceilometer"
+}
+
+// isACStillInUseByNodeSets checks whether any OpenStackDataPlaneNodeSet in the
+// namespace still has nodes that haven't been updated with the latest secret
+// versions. If any NodeSet has AllNodesUpdated=false or uninitialized tracking,
+// the AC credential may still be in use on EDPM nodes and must not be revoked.
+func (r *ApplicationCredentialReconciler) isACStillInUseByNodeSets(
+	ctx context.Context,
+	namespace string,
+) (stillInUse bool, info string, err error) {
+	logger := r.GetLogger(ctx)
+
+	nodesets := &dataplanev1.OpenStackDataPlaneNodeSetList{}
+	if err := r.List(ctx, nodesets, client.InNamespace(namespace)); err != nil {
+		return true, "", fmt.Errorf("failed to list OpenStackDataPlaneNodeSets: %w", err)
+	}
+
+	if len(nodesets.Items) == 0 {
+		logger.V(1).Info("No nodesets found, EDPM credentials not in use")
+		return false, "", nil
+	}
+
+	var nodesetsWithEmptyStatus []string
+
+	for i := range nodesets.Items {
+		nodeset := &nodesets.Items[i]
+
+		if err := ctx.Err(); err != nil {
+			return true, "", fmt.Errorf("context cancelled during nodeset check: %w", err)
+		}
+
+		if !nodeset.AreAllNodesUpdated() {
+			if nodeset.Status.SecretDeployment == nil {
+				nodesetsWithEmptyStatus = append(nodesetsWithEmptyStatus, nodeset.Name)
+				continue
+			}
+
+			info := fmt.Sprintf("nodeset %s/%s: %d/%d nodes updated with current secrets",
+				nodeset.Namespace, nodeset.Name,
+				nodeset.Status.SecretDeployment.UpdatedNodes,
+				nodeset.Status.SecretDeployment.TotalNodes)
+
+			logger.Info("Nodeset has nodes with pending secret updates, blocking application credential cleanup",
+				"nodeset", nodeset.Name,
+				"updatedNodes", nodeset.Status.SecretDeployment.UpdatedNodes,
+				"totalNodes", nodeset.Status.SecretDeployment.TotalNodes)
+
+			return true, info, nil
+		}
+	}
+
+	if len(nodesetsWithEmptyStatus) > 0 {
+		return true, "", fmt.Errorf("nodesets with empty SecretDeployment status: %s: %w",
+			strings.Join(nodesetsWithEmptyStatus, ", "), errEDPMTrackingUninitialized)
+	}
+
+	logger.Info("All EDPM nodesets have all nodes updated, application credential cleanup is safe",
+		"nodesetsChecked", len(nodesets.Items))
+	return false, "", nil
+}
+
 // cleanupUnusedRotatedSecrets runs during reconcileNormal (AC CR is not being deleted)
 // Finds rotated secrets that are neither current nor previous and have no service consumer finalizer
 // For each: revoke its AC in Keystone, remove the protection finalizer, delete the K8s Secret
+//
+// For EDPM-consuming ACs (nova, ceilometer), cleanup is blocked until all
+// OpenStackDataPlaneNodeSet nodes have been updated with current secrets.
 func (r *ApplicationCredentialReconciler) cleanupUnusedRotatedSecrets(
 	ctx context.Context,
 	instance *keystonev1.KeystoneApplicationCredential,
 	helperObj *helper.Helper,
 	identClient *gophercloud.ServiceClient,
 	userID string,
-) error {
+) (ctrl.Result, error) {
 	logger := r.GetLogger(ctx)
 	serviceName := strings.TrimPrefix(instance.Name, "ac-")
+
+	// For EDPM consumers, check whether all NodeSet nodes have been updated
+	// before revoking/deleting old secrets that may still be in use on EDPM nodes
+	if isEDPMConsumerAC(instance.Name) {
+		stillInUse, info, err := r.isACStillInUseByNodeSets(ctx, instance.Namespace)
+		if err != nil {
+			logger.Info("EDPM nodeset check failed, skipping application credential cleanup — will retry", "error", err)
+			return ctrl.Result{RequeueAfter: EDPMCheckInterval}, nil
+		}
+		if stillInUse {
+			logger.Info("EDPM nodes still using old credentials, skipping application credential cleanup — will retry", "info", info)
+			return ctrl.Result{RequeueAfter: EDPMCheckInterval}, nil
+		}
+	}
 
 	secretList, err := oko_secret.GetSecrets(ctx, helperObj, instance.Namespace, map[string]string{
 		"application-credentials":        "true",
 		"application-credential-service": serviceName,
 	})
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	for i := range secretList.Items {
@@ -613,23 +730,23 @@ func (r *ApplicationCredentialReconciler) cleanupUnusedRotatedSecrets(
 		acID := string(s.Data[keystonev1.ACIDSecretKey])
 		if acID != "" {
 			if err := revokeKeystoneAC(ctx, identClient, userID, acID); err != nil {
-				return err
+				return ctrl.Result{}, err
 			}
-			logger.Info("Revoked AC in Keystone", "ACID", acID, "secret", s.Name)
+			logger.Info("Revoked application credential in Keystone", "ACID", acID, "secret", s.Name)
 		}
 
 		if controllerutil.RemoveFinalizer(s, acSecretFinalizer) {
 			if err := helperObj.GetClient().Update(ctx, s); err != nil {
-				return fmt.Errorf("failed to remove protection finalizer from %s: %w", s.Name, err)
+				return ctrl.Result{}, fmt.Errorf("failed to remove protection finalizer from %s: %w", s.Name, err)
 			}
-			logger.Info("Removed protection finalizer from AC secret", "secret", s.Name)
+			logger.Info("Removed protection finalizer from application credential secret", "secret", s.Name)
 		}
 		if err := helperObj.GetClient().Delete(ctx, s); err != nil && !k8s_errors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete AC secret %s: %w", s.Name, err)
+			return ctrl.Result{}, fmt.Errorf("failed to delete application credential secret %s: %w", s.Name, err)
 		}
-		logger.Info("Deleted unused rotated AC secret", "secret", s.Name)
+		logger.Info("Deleted unused rotated application credential secret", "secret", s.Name)
 	}
-	return nil
+	return ctrl.Result{}, nil
 }
 
 // createACWithName creates a new ApplicationCredential in Keystone
@@ -732,7 +849,7 @@ func (r *ApplicationCredentialReconciler) createImmutableACSecret(
 		},
 	}
 	if err := controllerutil.SetControllerReference(ac, secret, helperObj.GetScheme()); err != nil {
-		return "", fmt.Errorf("failed to set controller reference on AC secret %s: %w", secretName, err)
+		return "", fmt.Errorf("failed to set controller reference on application credential secret %s: %w", secretName, err)
 	}
 
 	if err := helperObj.GetClient().Create(ctx, secret); err != nil {
@@ -744,18 +861,18 @@ func (r *ApplicationCredentialReconciler) createImmutableACSecret(
 			// whose first 5 characters are identical, producing the same secret name).
 			existing, _, getErr := oko_secret.GetSecret(ctx, helperObj, secretName, ac.Namespace)
 			if getErr != nil {
-				return "", fmt.Errorf("AC secret %s already exists but failed to fetch for validation: %w", secretName, getErr)
+				return "", fmt.Errorf("application credential secret %s already exists but failed to fetch for validation: %w", secretName, getErr)
 			}
 			existingACID := string(existing.Data[keystonev1.ACIDSecretKey])
 			if existingACID != newID {
 				return "", fmt.Errorf("%w: secret=%s existingACID=%s expectedACID=%s", errACIDMismatch, secretName, existingACID, newID)
 			}
-			logger.Info("Immutable AC secret already exists with matching ACID, proceeding", "secret", secretName, "ACID", newID)
+			logger.Info("Immutable application credential secret already exists with matching ACID, proceeding", "secret", secretName, "ACID", newID)
 			return secretName, nil
 		}
-		return "", fmt.Errorf("failed to create immutable AC secret %s: %w", secretName, err)
+		return "", fmt.Errorf("failed to create immutable application credential secret %s: %w", secretName, err)
 	}
-	logger.Info("Created immutable AC secret", "secret", secretName, "ACID", newID)
+	logger.Info("Created immutable application credential secret", "secret", secretName, "ACID", newID)
 
 	return secretName, nil
 }
@@ -816,7 +933,36 @@ func (r *ApplicationCredentialReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Owns(&corev1.Secret{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc: func(_ event.CreateEvent) bool { return false },
 		})).
+		Watches(&dataplanev1.OpenStackDataPlaneNodeSet{},
+			handler.EnqueueRequestsFromMapFunc(r.nodesetToACMapFunc)).
 		Complete(r)
+}
+
+// nodesetToACMapFunc maps NodeSet status changes to AC CRs for EDPM-consuming
+// services. When a NodeSet updates its SecretDeployment status, the AC
+// controller re-evaluates whether old rotated secrets can be cleaned up.
+func (r *ApplicationCredentialReconciler) nodesetToACMapFunc(ctx context.Context, _ client.Object) []reconcile.Request {
+	logger := r.GetLogger(ctx)
+
+	acList := &keystonev1.KeystoneApplicationCredentialList{}
+	if err := r.List(ctx, acList); err != nil {
+		logger.Error(err, "Failed to list application credential CRs for nodeset watch")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for i := range acList.Items {
+		ac := &acList.Items[i]
+		if isEDPMConsumerAC(ac.Name) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      ac.Name,
+					Namespace: ac.Namespace,
+				},
+			})
+		}
+	}
+	return requests
 }
 
 // GetLogger returns a logger configured for this controller.
