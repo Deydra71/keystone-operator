@@ -33,6 +33,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
+	edpm "github.com/openstack-k8s-operators/lib-common/modules/edpm"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,8 +47,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const acSecretFinalizer = "openstack.org/ac-secret-protection" // #nosec G101
@@ -70,6 +73,7 @@ type ApplicationCredentialReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=delete
 //+kubebuilder:rbac:groups=core,resources=secrets/finalizers,verbs=get;list;create;update;delete;patch
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=dataplane.openstack.org,resources=openstackdataplanenodesets,verbs=get;list;watch
 
 // Reconcile reconciles a KeystoneApplicationCredential resource.
 func (r *ApplicationCredentialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -562,18 +566,10 @@ func (r *ApplicationCredentialReconciler) ensureServiceLabel(
 
 // hasConsumerFinalizer returns true if the secret has any finalizer matching the AC consumer convention (suffix: -ac-consumer)
 //
-// Currently the controlplane service operators (barbican, cinder, etc.) place
-// finalizers like "openstack.org/barbican-ac-consumer" on the AC secret they
-// are actively using
-//
-// TODO(OSPRH-28176): EDPM services (nova, ceilometer, aodh) that consume AC
-// secrets on dataplane nodes must also place an EDPM-scoped consumer finalizer
-// (e.g. "openstack.org/edpm-nova-ac-consumer") on the secret. This will
-// prevent the keystone-operator from revoking/deleting a secret that is still
-// deployed to dataplane nodes that have not yet been updated. The EDPM
-// finalizer should only be removed once all nodes across all NodeSets have
-// been redeployed with the new credentials. This depends on per-node secret
-// rotation tracking: https://github.com/openstack-k8s-operators/openstack-operator/pull/1781
+// Controlplane service operators (barbican, cinder, etc.) place finalizers like
+// "openstack.org/barbican-ac-consumer" on the AC secret they are actively using.
+// EDPM protection is handled separately by checking NodeSet secret hash sync
+// in cleanupUnusedRotatedSecrets before any revocation occurs.
 func hasConsumerFinalizer(secret *corev1.Secret) bool {
 	for _, f := range secret.Finalizers {
 		if strings.HasPrefix(f, "openstack.org/") && strings.HasSuffix(f, "-ac-consumer") {
@@ -595,6 +591,20 @@ func (r *ApplicationCredentialReconciler) cleanupUnusedRotatedSecrets(
 ) error {
 	logger := r.GetLogger(ctx)
 	serviceName := strings.TrimPrefix(instance.Name, "ac-")
+
+	// Block revocation while any EDPM NodeSet has not yet been redeployed
+	// with the current config secrets. This prevents revoking an AC that is
+	// still in use on dataplane nodes after a rotation.
+	inSync, syncInfo, err := edpm.AreSecretHashesInSync(ctx, helperObj.GetClient(), instance.Namespace)
+	if err != nil {
+		logger.Info("Could not check NodeSet hash sync, skipping cleanup", "error", err)
+		return nil
+	}
+	if !inSync {
+		logger.Info("NodeSet secret hashes out of sync, deferring AC cleanup",
+			"ac", instance.Name, "info", syncInfo)
+		return nil
+	}
 
 	secretList, err := oko_secret.GetSecrets(ctx, helperObj, instance.Namespace, map[string]string{
 		"application-credentials":        "true",
@@ -816,7 +826,45 @@ func (r *ApplicationCredentialReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Owns(&corev1.Secret{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc: func(_ event.CreateEvent) bool { return false },
 		})).
+		// Watch OpenStackDataPlaneNodeSet (unstructured) so that when a NodeSet
+		// status changes (e.g. after an EDPM deploy updates SecretHashes), all
+		// AC CRs are re-evaluated for cleanup eligibility.
+		Watches(edpm.NewNodeSetObject(),
+			handler.EnqueueRequestsFromMapFunc(r.nodesetToACMapFunc),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Complete(r)
+}
+
+// nodesetToACMapFunc maps any NodeSet change to reconcile requests for all
+// KeystoneApplicationCredential CRs in the same namespace. This allows the
+// controller to re-evaluate cleanup eligibility when EDPM deploys complete.
+func (r *ApplicationCredentialReconciler) nodesetToACMapFunc(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	logger := r.GetLogger(ctx)
+
+	acList := &keystonev1.KeystoneApplicationCredentialList{}
+	if err := r.List(ctx, acList, client.InNamespace(obj.GetNamespace())); err != nil {
+		logger.Error(err, "Failed to list KeystoneApplicationCredential CRs for NodeSet watch")
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(acList.Items))
+	for _, ac := range acList.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      ac.Name,
+				Namespace: ac.Namespace,
+			},
+		})
+	}
+	if len(requests) > 0 {
+		logger.Info("NodeSet change detected, enqueuing AC CRs for reconciliation",
+			"nodeset", obj.GetName(), "acCount", len(requests))
+	}
+	return requests
 }
 
 // GetLogger returns a logger configured for this controller.
